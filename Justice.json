@@ -1,0 +1,146 @@
+{
+  "name": "Justice",
+  "tier": "T1",
+  "resources": {
+    "hp": {
+      "current": 12,
+      "max": 12
+    },
+    "mana": {
+      "current": 8,
+      "max": 8
+    },
+    "pbd": 1,
+    "unspent_points": 0
+  },
+  "skills": {
+    "core": {
+      "current": 2,
+      "max": 2
+    },
+    "inner": {
+      "current": 4,
+      "max": 4
+    },
+    "outer": {
+      "current": 6,
+      "max": 6
+    }
+  },
+  "stats": {
+    "str": 16,
+    "dex": 17,
+    "con": 16,
+    "int": 12,
+    "wis": 15,
+    "cha": 14,
+    "san": 13,
+    "hnr": 18
+  },
+  "growth_items": {
+    "bound_current": 0,
+    "bound_max": 0
+  },
+  "ability_slots": {
+    "core_max": 2,
+    "inner_max": 4,
+    "outer_max": 6
+  },
+  "inventory": {
+    "equipment": [
+      {
+        "name": "Rapier",
+        "favorite": true,
+        "roll_type": "Attack",
+        "damage": "1d6+2",
+        "notes": "Finesse. If you have advantage, add +2 to hit. On a crit, roll +1 extra d6."
+      },
+      {
+        "name": "Shield",
+        "favorite": false,
+        "roll_type": "None",
+        "damage": "",
+        "notes": ""
+      }
+    ],
+    "bag": [
+      {
+        "name": "Rope (50ft)",
+        "favorite": false,
+        "roll_type": "None",
+        "damage": "",
+        "notes": ""
+      }
+    ],
+    "storage": [
+      {
+        "name": "Winter clothes",
+        "favorite": true,
+        "roll_type": "None",
+        "damage": "",
+        "notes": ""
+      }
+    ]
+  },
+  "notes": "test",
+  "world_info": "test",
+  "talents": {
+    "T1": {
+      "name": "Chromacat Cadenza",
+      "tagline": "A blur of color and sound that rewrites the beat of battle.",
+      "trigger": {
+        "type": "reaction",
+        "text": "When a creature uses your Bardic Inspiration."
+      },
+      "effects": [
+        {
+          "id": "soundstep_swap",
+          "name": "Soundstep Swap",
+          "text": "You and the inspired creature swap places (both must be within 30 ft and you must see each other). The ally can immediately move up to 10 ft without provoking OA."
+        },
+        {
+          "id": "afterimage_guard",
+          "name": "Afterimage Guard",
+          "text": "You shed a sonic afterimage on the ally that grants +2 AC until the start of your next turn. The first attack that misses them triggers a reverberation dealing PB thunder damage to the attacker."
+        },
+        {
+          "id": "show_must_go_on",
+          "name": "The Show Must Go On",
+          "text": "Once per long rest if an ally goes down to or below 0 hp, keep them up and in the fight for 3 turns where they will keep fighting until they drop at which point they will need an hour rest before they are awake. (If target takes >= 50% of their total health during the 3 turns they will instead be downed due to that).",
+          "uses": {
+            "per": "long_rest",
+            "max": 1,
+            "used": 0
+          }
+        }
+      ],
+      "mana_flair": {
+        "cost": 1,
+        "timing": "no action, when you trigger Cadenza",
+        "text": "The inspired creature also regains 1 spent mana (once per round).",
+        "uses_per_round": 1
+      }
+    },
+    "T3": {
+      "locked": true
+    },
+    "T15": {
+      "locked": true
+    },
+    "T25": {
+      "locked": true
+    }
+  },
+  "abilities": {
+    "core": [],
+    "inner": [],
+    "outer": []
+  },
+  "items": [
+    "Rapier",
+    "Shield",
+    "Rope (50ft)",
+    "Winter clothes"
+  ],
+  "spells": []
+}
