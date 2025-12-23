@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
+from damage_lab import DamageLabTab
 import re
 import math
 
@@ -15,8 +16,16 @@ ABILITY_MODS = {
     "outer": {"dmg": 0.75, "mana": 2.00},
 }
 
+# ---------- Tier 1 tuning ----------
+T1_HP_SOFT_CAP = 100
+T1_HP_GAIN_BEFORE_CAP = 2
+T1_HP_GAIN_AFTER_CAP = 1  # tweak if you want a different post-cap rate
 
-# ---------------- Combat math helpers ----------------
+T1_PBD_SOFT_CAP = 15
+T1_PBD_COST_BEFORE_CAP = 3
+T1_PBD_GAIN_BEFORE_CAP = 1
+T1_PBD_COST_AFTER_CAP = 5   # tweak if you want harsher/softer beyond cap
+T1_PBD_GAIN_AFTER_CAP = 1
 
 def parse_damage_expr(expr: str):
     """
@@ -38,6 +47,7 @@ def parse_damage_expr(expr: str):
     dice_count = int(count_str) if count_str else 1
     die_size = int(die_str)
 
+    # Sum all +N/-N after the dice part (simple but effective)
     flat_bonus = 0
     rest = s[m.end():]
     for sign, num in re.findall(r'([+-])(\d+)', rest):
@@ -46,18 +56,13 @@ def parse_damage_expr(expr: str):
     return dice_count, die_size, flat_bonus
 
 
-def clamp(x: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, x))
-
-
 def max_pbd_factor_for_die(die_size: int) -> float:
     """
     Piecewise linear mapping:
       d4  -> 0.50
       d10 -> 1.00
-      d20 -> 2.111... (so 18/20 => 1.9x)
-
-    For other dice, interpolate between anchors.
+      d20 -> 2.111... (so 18/20 => ~1.9x)
+    For other dice, interpolate.
     """
     anchors = [(4, 0.50), (10, 1.00), (20, 2.1111111111)]
 
@@ -74,7 +79,49 @@ def max_pbd_factor_for_die(die_size: int) -> float:
     return 1.0
 
 
-# ---------------- Persistence helpers ----------------
+def clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+
+def compute_overcast_bonus(base_cost_eff: int, spent_eff: int, over: dict) -> int:
+    """
+    Log-ish overcast bonus:
+      bonus = floor(scale * (log2(spent/base))^power), capped.
+    """
+    if base_cost_eff <= 0 or spent_eff <= base_cost_eff:
+        return 0
+    if not isinstance(over, dict):
+        return 0
+    if not over.get("enabled", False):
+        return 0
+
+    try:
+        scale = int(over.get("scale", 0) or 0)
+    except Exception:
+        scale = 0
+    try:
+        power = float(over.get("power", 0.85) or 0.85)
+    except Exception:
+        power = 0.85
+    try:
+        cap = int(over.get("cap", 999) or 999)
+    except Exception:
+        cap = 999
+
+    if scale <= 0:
+        return 0
+
+    ratio = spent_eff / base_cost_eff
+    x = math.log(ratio, 2)  # 1 at 2x, 2 at 4x, etc.
+    bonus = int(math.floor(scale * (x ** power)))
+    if cap >= 0:
+        bonus = min(bonus, cap)
+    return max(0, bonus)
+
+
+CHAR_PATH = Path("joe.json")
+ROLL_TYPES = ["None", "Attack", "Save", "Check"]
+
 
 def load_character(path=CHAR_PATH):
     if not path.exists():
@@ -104,8 +151,19 @@ def sort_favorites_first(items):
 
 
 def ensure_item_obj(x):
+    """
+    Items are assumed to be melee by default for PBD purposes.
+    If you add a ranged weapon later, set "apply_pbd": false on that item.
+    """
     if isinstance(x, str):
-        return {"name": x, "favorite": False, "roll_type": "None", "damage": "", "notes": ""}
+        return {
+            "name": x,
+            "favorite": False,
+            "roll_type": "None",
+            "damage": "",
+            "notes": "",
+            "apply_pbd": True
+        }
     if isinstance(x, dict):
         return {
             "name": x.get("name", ""),
@@ -113,14 +171,41 @@ def ensure_item_obj(x):
             "roll_type": x.get("roll_type", "None"),
             "damage": x.get("damage", ""),
             "notes": x.get("notes", ""),
+            "apply_pbd": bool(x.get("apply_pbd", True)),
         }
-    return {"name": "", "favorite": False, "roll_type": "None", "damage": "", "notes": ""}
+    return {"name": "", "favorite": False, "roll_type": "None", "damage": "", "notes": "", "apply_pbd": True}
 
 
 def ensure_ability_obj(x):
+    """
+    Abilities NEVER use PBD. They can optionally have overcast scaling.
+    """
     if isinstance(x, str):
-        return {"name": x, "favorite": False, "roll_type": "None", "damage": "", "mana_cost": 0, "notes": ""}
+        return {
+            "name": x, "favorite": False, "roll_type": "None",
+            "damage": "", "mana_cost": 0, "notes": "",
+            "overcast": {"enabled": False, "scale": 0, "power": 0.85, "cap": 999}
+        }
+
     if isinstance(x, dict):
+        over = x.get("overcast", {})
+        if not isinstance(over, dict):
+            over = {}
+
+        try:
+            scale = int(over.get("scale", 0) or 0)
+        except Exception:
+            scale = 0
+        try:
+            power = float(over.get("power", 0.85) or 0.85)
+        except Exception:
+            power = 0.85
+        try:
+            cap = int(over.get("cap", 999) or 999)
+        except Exception:
+            cap = 999
+        enabled = bool(over.get("enabled", False))
+
         return {
             "name": x.get("name", ""),
             "favorite": bool(x.get("favorite", False)),
@@ -128,11 +213,15 @@ def ensure_ability_obj(x):
             "damage": x.get("damage", ""),
             "mana_cost": int(x.get("mana_cost", 0) or 0),
             "notes": x.get("notes", ""),
+            "overcast": {"enabled": enabled, "scale": scale, "power": power, "cap": cap},
         }
-    return {"name": "", "favorite": False, "roll_type": "None", "damage": "", "mana_cost": 0, "notes": ""}
 
+    return {
+        "name": "", "favorite": False, "roll_type": "None",
+        "damage": "", "mana_cost": 0, "notes": "",
+        "overcast": {"enabled": False, "scale": 0, "power": 0.85, "cap": 999}
+    }
 
-# ---------------- App ----------------
 
 class CharacterApp(tk.Tk):
     def __init__(self):
@@ -164,36 +253,47 @@ class CharacterApp(tk.Tk):
         self.var_outer_current = tk.StringVar()
         self.var_outer_max = tk.StringVar()
 
-        self.var_stats = {k: tk.StringVar() for k in ["str", "dex", "con", "int", "wis", "cha", "san", "hnr"]}
+        self.var_stats = {k: tk.StringVar() for k in ["str","dex","con","int","wis","cha","san","hnr"]}
 
         self.var_growth_current = tk.StringVar()
         self.var_growth_max = tk.StringVar()
 
         self.var_show_used = tk.BooleanVar()
 
-        # Inventory internal data
+        # Inventory internal data (sub-tabs)
         self.inv_keys = ["equipment", "bag", "storage"]
         self.inv_data = {k: [] for k in self.inv_keys}
-        self.inv_selected_obj = {k: None for k in self.inv_keys}
+
+        # IMPORTANT: store selected object ref (not index) so re-renders don't break selection
+        self.inv_selected_ref = {k: None for k in self.inv_keys}
+
         self.inv_new_name = {k: tk.StringVar() for k in self.inv_keys}
         self.inv_roll_type = {k: tk.StringVar(value="None") for k in self.inv_keys}
         self.inv_damage = {k: tk.StringVar() for k in self.inv_keys}
+        self.inv_apply_pbd = {k: tk.BooleanVar(value=True) for k in self.inv_keys}
 
-        # Abilities
+        # ---- Abilities ----
         self.ability_keys = ["core", "inner", "outer"]
         self.abilities_data = {k: [] for k in self.ability_keys}
-        self.ability_selected_obj = {k: None for k in self.ability_keys}
+        self.ability_selected_ref = {k: None for k in self.ability_keys}
+
         self.var_new_ability_name = {k: tk.StringVar() for k in self.ability_keys}
         self.ability_roll_type = {k: tk.StringVar(value="None") for k in self.ability_keys}
         self.ability_damage = {k: tk.StringVar() for k in self.ability_keys}
         self.ability_mana_cost = {k: tk.StringVar(value="0") for k in self.ability_keys}
 
+        self.ability_overcast_enabled = {k: tk.BooleanVar(value=False) for k in self.ability_keys}
+        self.ability_overcast_scale   = {k: tk.StringVar(value="0") for k in self.ability_keys}
+        self.ability_overcast_power   = {k: tk.StringVar(value="0.85") for k in self.ability_keys}
+        self.ability_overcast_cap     = {k: tk.StringVar(value="999") for k in self.ability_keys}
+
         # Combat (Overview quick use)
-        self.combat_actions = []  # list of dicts {kind, ref, slot?, display, favorite, name}
-        self.combat_selected = None
+        self.combat_actions = []  # list of dicts {kind, ref, display, slot?}
+        self.combat_selected_ref = None
+        self.combat_selected_kind = None
+
         self.var_combat_roll_type = tk.StringVar(value="")
         self.var_combat_damage_expr = tk.StringVar(value="")
-        self.var_combat_slot = tk.StringVar(value="")
         self.var_combat_roll_value = tk.StringVar()
         self.var_combat_mana_spend = tk.StringVar()
         self.var_combat_result = tk.StringVar(value="")
@@ -226,6 +326,8 @@ class CharacterApp(tk.Tk):
         self.tab_abilities = ttk.Frame(self.tabs)
         self.tab_notes = ttk.Frame(self.tabs)
         self.tab_world = ttk.Frame(self.tabs)
+        self.tab_damage_lab = ttk.Frame(self.tabs)
+
 
         self.tabs.add(self.tab_overview, text="Overview")
         self.tabs.add(self.tab_talents, text="Talents")
@@ -233,6 +335,7 @@ class CharacterApp(tk.Tk):
         self.tabs.add(self.tab_abilities, text="Abilities")
         self.tabs.add(self.tab_notes, text="Notes")
         self.tabs.add(self.tab_world, text="World Info")
+        self.tabs.add(self.tab_damage_lab, text="Damage Lab")
 
         self._build_overview_tab()
         self._build_talents_tab()
@@ -240,6 +343,8 @@ class CharacterApp(tk.Tk):
         self._build_abilities_tab()
         self._build_notes_tab()
         self._build_world_tab()
+        self._build_damage_lab_tab()
+
 
     def _build_overview_tab(self):
         left = ttk.Frame(self.tab_overview)
@@ -251,8 +356,8 @@ class CharacterApp(tk.Tk):
         stats_frame = ttk.LabelFrame(left, text="Stats")
         stats_frame.pack(fill=tk.X, pady=6)
 
-        for row, key in enumerate(["str", "dex", "con", "int", "wis", "cha", "san", "hnr"]):
-            ttk.Label(stats_frame, text=key.upper() + ":").grid(row=row, column=0, sticky="w", padx=4, pady=2)
+        for row, key in enumerate(["str","dex","con","int","wis","cha","san","hnr"]):
+            ttk.Label(stats_frame, text=key.upper()+":").grid(row=row, column=0, sticky="w", padx=4, pady=2)
             ttk.Entry(stats_frame, textvariable=self.var_stats[key], width=6).grid(row=row, column=1, sticky="w", padx=4, pady=2)
 
         # Resources
@@ -322,7 +427,7 @@ class CharacterApp(tk.Tk):
         ttk.Entry(growth_frame, textvariable=self.var_growth_max, width=6).grid(row=0, column=2, padx=4, pady=6)
 
         # Combat quick use
-        combat = ttk.LabelFrame(right, text="Combat Quick Use (select equipment/ability)")
+        combat = ttk.LabelFrame(right, text="Combat Quick Use (select equipment / ability)")
         combat.pack(fill=tk.BOTH, expand=True, pady=6)
 
         c_outer = ttk.Frame(combat)
@@ -333,34 +438,31 @@ class CharacterApp(tk.Tk):
         c_left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
         c_right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.combat_list = tk.Listbox(c_left, height=14, exportselection=False)
+        self.combat_list = tk.Listbox(c_left, height=14)
         self.combat_list.pack(fill=tk.BOTH, expand=True)
         self.combat_list.bind("<<ListboxSelect>>", lambda _e: self.on_combat_select())
 
         ttk.Button(c_left, text="Refresh list", command=self.refresh_combat_list).pack(fill=tk.X, pady=(6, 0))
 
-        ttk.Label(c_right, text="Type/slot:").grid(row=0, column=0, sticky="w", padx=4, pady=(4, 2))
-        ttk.Label(c_right, textvariable=self.var_combat_slot).grid(row=0, column=1, sticky="w", padx=4, pady=(4, 2))
+        ttk.Label(c_right, text="Roll type:").grid(row=0, column=0, sticky="w", padx=4, pady=(4, 2))
+        ttk.Label(c_right, textvariable=self.var_combat_roll_type).grid(row=0, column=1, sticky="w", padx=4, pady=(4, 2))
 
-        ttk.Label(c_right, text="Roll type:").grid(row=1, column=0, sticky="w", padx=4, pady=2)
-        ttk.Label(c_right, textvariable=self.var_combat_roll_type).grid(row=1, column=1, sticky="w", padx=4, pady=2)
+        ttk.Label(c_right, text="Damage dice:").grid(row=1, column=0, sticky="w", padx=4, pady=2)
+        ttk.Label(c_right, textvariable=self.var_combat_damage_expr).grid(row=1, column=1, sticky="w", padx=4, pady=2)
 
-        ttk.Label(c_right, text="Damage dice (what to roll):").grid(row=2, column=0, sticky="w", padx=4, pady=2)
-        ttk.Label(c_right, textvariable=self.var_combat_damage_expr).grid(row=2, column=1, sticky="w", padx=4, pady=2)
+        ttk.Label(c_right, text="Enter rolled damage:").grid(row=2, column=0, sticky="w", padx=4, pady=(10, 2))
+        ttk.Entry(c_right, textvariable=self.var_combat_roll_value, width=10).grid(row=2, column=1, sticky="w", padx=4, pady=(10, 2))
 
-        ttk.Label(c_right, text="Enter rolled damage:").grid(row=3, column=0, sticky="w", padx=4, pady=(10, 2))
-        ttk.Entry(c_right, textvariable=self.var_combat_roll_value, width=10).grid(row=3, column=1, sticky="w", padx=4, pady=(10, 2))
-
-        ttk.Label(c_right, text="Mana to spend (abilities):").grid(row=4, column=0, sticky="w", padx=4, pady=2)
+        ttk.Label(c_right, text="Mana to spend (abilities):").grid(row=3, column=0, sticky="w", padx=4, pady=2)
         self.combat_mana_entry = ttk.Entry(c_right, textvariable=self.var_combat_mana_spend, width=10)
-        self.combat_mana_entry.grid(row=4, column=1, sticky="w", padx=4, pady=2)
+        self.combat_mana_entry.grid(row=3, column=1, sticky="w", padx=4, pady=2)
 
         ttk.Button(c_right, text="Use / Cast", command=self.use_combat_action).grid(
-            row=5, column=0, columnspan=2, sticky="ew", padx=4, pady=(12, 6)
+            row=4, column=0, columnspan=2, sticky="ew", padx=4, pady=(12, 6)
         )
 
         ttk.Label(c_right, textvariable=self.var_combat_result, foreground="gray").grid(
-            row=6, column=0, columnspan=2, sticky="w", padx=4, pady=(2, 2)
+            row=5, column=0, columnspan=2, sticky="w", padx=4, pady=(2, 2)
         )
 
         for col in range(2):
@@ -409,10 +511,11 @@ class CharacterApp(tk.Tk):
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        lb = tk.Listbox(left, height=18, exportselection=False)
+        lb = tk.Listbox(left, height=18)
         lb.pack(fill=tk.BOTH, expand=True)
         lb.bind("<Double-Button-1>", lambda _e, k=key: self.inv_toggle_favorite(k))
         lb.bind("<<ListboxSelect>>", lambda _e, k=key: self.inv_on_select(k))
+        setattr(self, f"inv_list_{key}", lb)
 
         controls = ttk.Frame(left)
         controls.pack(fill=tk.X, pady=(8, 0))
@@ -430,25 +533,37 @@ class CharacterApp(tk.Tk):
             row=0, column=1, sticky="w", padx=6, pady=(8, 4)
         )
 
-        ttk.Label(details, text="Damage dice (ex: 1d10+2):").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        ttk.Label(details, text="Damage dice (ex: 1d10+3):").grid(row=1, column=0, sticky="w", padx=6, pady=4)
         ttk.Entry(details, textvariable=self.inv_damage[key], width=28).grid(row=1, column=1, sticky="w", padx=6, pady=4)
 
-        ttk.Label(details, text="Notes:").grid(row=2, column=0, sticky="nw", padx=6, pady=4)
+        ttk.Checkbutton(details, text="Apply PBD (melee)", variable=self.inv_apply_pbd[key]).grid(
+            row=2, column=0, columnspan=2, sticky="w", padx=6, pady=(2, 6)
+        )
+
+        ttk.Label(details, text="Notes:").grid(row=3, column=0, sticky="nw", padx=6, pady=4)
         notes_box = tk.Text(details, wrap="word", height=10)
-        notes_box.grid(row=2, column=1, sticky="nsew", padx=6, pady=4)
+        notes_box.grid(row=3, column=1, sticky="nsew", padx=6, pady=4)
         setattr(self, f"inv_notes_box_{key}", notes_box)
 
         ttk.Button(details, text="Update Selected", command=lambda k=key: self.inv_update_selected(k)).grid(
-            row=3, column=1, sticky="w", padx=6, pady=(6, 8)
+            row=4, column=1, sticky="w", padx=6, pady=(6, 8)
         )
 
         details.grid_columnconfigure(1, weight=1)
-        details.grid_rowconfigure(2, weight=1)
+        details.grid_rowconfigure(3, weight=1)
 
-        setattr(self, f"inv_list_{key}", lb)
+    def _select_ref_in_listbox(self, lb: tk.Listbox, data_list: list, ref_obj):
+        lb.selection_clear(0, tk.END)
+        if ref_obj is None:
+            return
+        for idx, obj in enumerate(data_list):
+            if obj is ref_obj:
+                lb.selection_set(idx)
+                lb.see(idx)
+                break
 
     def inv_render(self, key: str):
-        selected = self.inv_selected_obj.get(key)
+        selected_ref = self.inv_selected_ref.get(key)
         self.inv_data[key] = sort_favorites_first(self.inv_data[key])
 
         lb: tk.Listbox = getattr(self, f"inv_list_{key}")
@@ -457,24 +572,20 @@ class CharacterApp(tk.Tk):
             star = "⭐ " if it.get("favorite", False) else ""
             lb.insert(tk.END, f"{star}{it.get('name','')}")
 
-        # restore selection
-        if selected in self.inv_data[key]:
-            idx = self.inv_data[key].index(selected)
-            lb.selection_set(idx)
-            lb.activate(idx)
-
+        # restore selection after re-render
+        self._select_ref_in_listbox(lb, self.inv_data[key], selected_ref)
         self.refresh_combat_list()
 
     def inv_add(self, key: str):
         name = self.inv_new_name[key].get().strip()
         if not name:
             return
-        it = {"name": name, "favorite": False, "roll_type": "None", "damage": "", "notes": ""}
-        self.inv_data[key].append(it)
+        self.inv_data[key].append({
+            "name": name, "favorite": False, "roll_type": "None",
+            "damage": "", "notes": "", "apply_pbd": True
+        })
         self.inv_new_name[key].set("")
-        self.inv_selected_obj[key] = it
         self.inv_render(key)
-        self.inv_on_select(key)
 
     def inv_remove(self, key: str):
         lb: tk.Listbox = getattr(self, f"inv_list_{key}")
@@ -484,8 +595,8 @@ class CharacterApp(tk.Tk):
         for idx in reversed(sel):
             if 0 <= idx < len(self.inv_data[key]):
                 removed = self.inv_data[key].pop(idx)
-                if self.inv_selected_obj.get(key) is removed:
-                    self.inv_selected_obj[key] = None
+                if removed is self.inv_selected_ref.get(key):
+                    self.inv_selected_ref[key] = None
         self.inv_render(key)
 
     def inv_toggle_favorite(self, key: str):
@@ -496,55 +607,47 @@ class CharacterApp(tk.Tk):
         idx = sel[0]
         if 0 <= idx < len(self.inv_data[key]):
             self.inv_data[key][idx]["favorite"] = not bool(self.inv_data[key][idx].get("favorite", False))
-            self.inv_selected_obj[key] = self.inv_data[key][idx]
+            self.inv_selected_ref[key] = self.inv_data[key][idx]
         self.inv_render(key)
-        self.inv_on_select(key)
 
     def inv_on_select(self, key: str):
         lb: tk.Listbox = getattr(self, f"inv_list_{key}")
         sel = list(lb.curselection())
         if len(sel) != 1:
+            self.inv_selected_ref[key] = None
             return
         idx = sel[0]
-        if not (0 <= idx < len(self.inv_data[key])):
-            return
-
         it = self.inv_data[key][idx]
-        self.inv_selected_obj[key] = it
+        self.inv_selected_ref[key] = it
 
         self.inv_roll_type[key].set(it.get("roll_type", "None"))
         self.inv_damage[key].set(it.get("damage", ""))
+        self.inv_apply_pbd[key].set(bool(it.get("apply_pbd", True)))
 
         notes_box: tk.Text = getattr(self, f"inv_notes_box_{key}")
         notes_box.delete("1.0", tk.END)
         notes_box.insert(tk.END, it.get("notes", ""))
 
     def inv_update_selected(self, key: str):
-        it = self.inv_selected_obj.get(key)
+        it = self.inv_selected_ref.get(key)
         if it is None:
             messagebox.showinfo("Update", "Select an item first.")
             return
 
         it["roll_type"] = self.inv_roll_type[key].get() or "None"
         it["damage"] = self.inv_damage[key].get().strip()
+        it["apply_pbd"] = bool(self.inv_apply_pbd[key].get())
 
         notes_box: tk.Text = getattr(self, f"inv_notes_box_{key}")
         it["notes"] = notes_box.get("1.0", tk.END).rstrip("\n")
 
         self.inv_render(key)
-        self.inv_on_select(key)
 
     # ---------------- Abilities ----------------
 
     def _build_abilities_tab(self):
         frame = ttk.Frame(self.tab_abilities)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        info = ttk.LabelFrame(frame, text="Slot Multipliers")
-        info.pack(fill=tk.X, pady=(0, 10))
-        ttk.Label(info, text="Core: 150% damage, 75% mana    |    Inner: 100% damage, 100% mana    |    Outer: 75% damage, 200% mana").pack(
-            anchor="w", padx=8, pady=6
-        )
 
         self.ability_tabs = ttk.Notebook(frame)
         self.ability_tabs.pack(fill=tk.BOTH, expand=True)
@@ -563,10 +666,11 @@ class CharacterApp(tk.Tk):
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        lb = tk.Listbox(left, height=18, exportselection=False)
+        lb = tk.Listbox(left, height=18)
         lb.pack(fill=tk.BOTH, expand=True)
         lb.bind("<Double-Button-1>", lambda _e, k=key: self.ability_toggle_favorite(k))
         lb.bind("<<ListboxSelect>>", lambda _e, k=key: self.ability_on_select(k))
+        setattr(self, f"ability_list_{key}", lb)
 
         controls = ttk.Frame(left)
         controls.pack(fill=tk.X, pady=(8, 0))
@@ -576,7 +680,7 @@ class CharacterApp(tk.Tk):
         ttk.Button(controls, text="Remove", command=lambda k=key: self.ability_remove(k)).pack(side=tk.LEFT)
         ttk.Button(controls, text="Toggle ⭐", command=lambda k=key: self.ability_toggle_favorite(k)).pack(side=tk.LEFT, padx=6)
 
-        details = ttk.LabelFrame(right, text=f"Selected Ability ({key.upper()} slot)")
+        details = ttk.LabelFrame(right, text="Selected Ability (combat info)")
         details.pack(fill=tk.BOTH, expand=True)
 
         ttk.Label(details, text="Roll type:").grid(row=0, column=0, sticky="w", padx=6, pady=(8, 4))
@@ -590,22 +694,37 @@ class CharacterApp(tk.Tk):
         ttk.Label(details, text="Mana cost (base):").grid(row=2, column=0, sticky="w", padx=6, pady=4)
         ttk.Entry(details, textvariable=self.ability_mana_cost[key], width=10).grid(row=2, column=1, sticky="w", padx=6, pady=4)
 
-        ttk.Label(details, text="Notes:").grid(row=3, column=0, sticky="nw", padx=6, pady=4)
+        ttk.Separator(details, orient="horizontal").grid(row=3, column=0, columnspan=2, sticky="ew", padx=6, pady=(8, 8))
+
+        ttk.Checkbutton(
+            details,
+            text="Enable Overcast (log scaling)",
+            variable=self.ability_overcast_enabled[key]
+        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=6, pady=4)
+
+        ttk.Label(details, text="Bonus @2x mana (scale):").grid(row=5, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(details, textvariable=self.ability_overcast_scale[key], width=10).grid(row=5, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(details, text="Diminishing power:").grid(row=6, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(details, textvariable=self.ability_overcast_power[key], width=10).grid(row=6, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(details, text="Max bonus (cap):").grid(row=7, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(details, textvariable=self.ability_overcast_cap[key], width=10).grid(row=7, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(details, text="Notes:").grid(row=8, column=0, sticky="nw", padx=6, pady=4)
         notes_box = tk.Text(details, wrap="word", height=10)
-        notes_box.grid(row=3, column=1, sticky="nsew", padx=6, pady=4)
+        notes_box.grid(row=8, column=1, sticky="nsew", padx=6, pady=4)
         setattr(self, f"ability_notes_box_{key}", notes_box)
 
         ttk.Button(details, text="Update Selected", command=lambda k=key: self.ability_update_selected(k)).grid(
-            row=4, column=1, sticky="w", padx=6, pady=(6, 8)
+            row=9, column=1, sticky="w", padx=6, pady=(6, 8)
         )
 
         details.grid_columnconfigure(1, weight=1)
-        details.grid_rowconfigure(3, weight=1)
-
-        setattr(self, f"ability_list_{key}", lb)
+        details.grid_rowconfigure(8, weight=1)
 
     def ability_render(self, key: str):
-        selected = self.ability_selected_obj.get(key)
+        selected_ref = self.ability_selected_ref.get(key)
         self.abilities_data[key] = sort_favorites_first(self.abilities_data[key])
 
         lb: tk.Listbox = getattr(self, f"ability_list_{key}")
@@ -614,23 +733,16 @@ class CharacterApp(tk.Tk):
             star = "⭐ " if ab.get("favorite", False) else ""
             lb.insert(tk.END, f"{star}{ab.get('name','')}")
 
-        if selected in self.abilities_data[key]:
-            idx = self.abilities_data[key].index(selected)
-            lb.selection_set(idx)
-            lb.activate(idx)
-
+        self._select_ref_in_listbox(lb, self.abilities_data[key], selected_ref)
         self.refresh_combat_list()
 
     def ability_add(self, key: str):
         name = self.var_new_ability_name[key].get().strip()
         if not name:
             return
-        ab = {"name": name, "favorite": False, "roll_type": "None", "damage": "", "mana_cost": 0, "notes": ""}
-        self.abilities_data[key].append(ab)
+        self.abilities_data[key].append(ensure_ability_obj({"name": name}))
         self.var_new_ability_name[key].set("")
-        self.ability_selected_obj[key] = ab
         self.ability_render(key)
-        self.ability_on_select(key)
 
     def ability_remove(self, key: str):
         lb: tk.Listbox = getattr(self, f"ability_list_{key}")
@@ -640,8 +752,8 @@ class CharacterApp(tk.Tk):
         for idx in reversed(sel):
             if 0 <= idx < len(self.abilities_data[key]):
                 removed = self.abilities_data[key].pop(idx)
-                if self.ability_selected_obj.get(key) is removed:
-                    self.ability_selected_obj[key] = None
+                if removed is self.ability_selected_ref.get(key):
+                    self.ability_selected_ref[key] = None
         self.ability_render(key)
 
     def ability_toggle_favorite(self, key: str):
@@ -652,49 +764,71 @@ class CharacterApp(tk.Tk):
         idx = sel[0]
         if 0 <= idx < len(self.abilities_data[key]):
             self.abilities_data[key][idx]["favorite"] = not bool(self.abilities_data[key][idx].get("favorite", False))
-            self.ability_selected_obj[key] = self.abilities_data[key][idx]
+            self.ability_selected_ref[key] = self.abilities_data[key][idx]
         self.ability_render(key)
-        self.ability_on_select(key)
 
     def ability_on_select(self, key: str):
         lb: tk.Listbox = getattr(self, f"ability_list_{key}")
         sel = list(lb.curselection())
         if len(sel) != 1:
+            self.ability_selected_ref[key] = None
             return
         idx = sel[0]
-        if not (0 <= idx < len(self.abilities_data[key])):
-            return
-
         ab = self.abilities_data[key][idx]
-        self.ability_selected_obj[key] = ab
+        self.ability_selected_ref[key] = ab
 
         self.ability_roll_type[key].set(ab.get("roll_type", "None"))
         self.ability_damage[key].set(ab.get("damage", ""))
         self.ability_mana_cost[key].set(str(ab.get("mana_cost", 0)))
+
+        over = ab.get("overcast", {}) if isinstance(ab.get("overcast", {}), dict) else {}
+        self.ability_overcast_enabled[key].set(bool(over.get("enabled", False)))
+        self.ability_overcast_scale[key].set(str(over.get("scale", 0)))
+        self.ability_overcast_power[key].set(str(over.get("power", 0.85)))
+        self.ability_overcast_cap[key].set(str(over.get("cap", 999)))
 
         notes_box: tk.Text = getattr(self, f"ability_notes_box_{key}")
         notes_box.delete("1.0", tk.END)
         notes_box.insert(tk.END, ab.get("notes", ""))
 
     def ability_update_selected(self, key: str):
-        ab = self.ability_selected_obj.get(key)
+        ab = self.ability_selected_ref.get(key)
         if ab is None:
             messagebox.showinfo("Update", "Select an ability first.")
             return
 
         ab["roll_type"] = self.ability_roll_type[key].get() or "None"
         ab["damage"] = self.ability_damage[key].get().strip()
-
         try:
             ab["mana_cost"] = int(self.ability_mana_cost[key].get().strip() or "0")
         except ValueError:
             ab["mana_cost"] = 0
 
+        enabled = bool(self.ability_overcast_enabled[key].get())
+        try:
+            scale = int(self.ability_overcast_scale[key].get().strip() or "0")
+        except ValueError:
+            scale = 0
+        try:
+            power = float(self.ability_overcast_power[key].get().strip() or "0.85")
+        except ValueError:
+            power = 0.85
+        try:
+            cap = int(self.ability_overcast_cap[key].get().strip() or "999")
+        except ValueError:
+            cap = 999
+
+        ab["overcast"] = {
+            "enabled": enabled,
+            "scale": max(0, scale),
+            "power": max(0.1, power),
+            "cap": max(0, cap),
+        }
+
         notes_box: tk.Text = getattr(self, f"ability_notes_box_{key}")
         ab["notes"] = notes_box.get("1.0", tk.END).rstrip("\n")
 
         self.ability_render(key)
-        self.ability_on_select(key)
 
     # ---------------- Notes / World ----------------
 
@@ -716,53 +850,68 @@ class CharacterApp(tk.Tk):
     # ---------------- Combat Quick Use ----------------
 
     def refresh_combat_list(self):
+        # Keep old selection by ref
+        keep_ref = self.combat_selected_ref
+        keep_kind = self.combat_selected_kind
+
         actions = []
 
-        # Equipment only gets PBD
+        # Equipment (usually where weapons live)
         for it in self.inv_data.get("equipment", []):
             actions.append({
                 "kind": "item",
+                "slot": None,
                 "ref": it,
-                "slot": "equipment",
                 "favorite": bool(it.get("favorite", False)),
                 "name": it.get("name", ""),
-                "display": f"{'⭐ ' if it.get('favorite', False) else ''}{it.get('name','')}  (Equipment)",
+                "display": f"{'⭐ ' if it.get('favorite', False) else ''}{it.get('name','')}  (Item)",
             })
 
-        # Abilities (core/inner/outer) — NO PBD
+        # Abilities: core/inner/outer
         for slot in ["core", "inner", "outer"]:
             for ab in self.abilities_data.get(slot, []):
                 actions.append({
                     "kind": "ability",
-                    "ref": ab,
                     "slot": slot,
+                    "ref": ab,
                     "favorite": bool(ab.get("favorite", False)),
                     "name": ab.get("name", ""),
-                    "display": f"{'⭐ ' if ab.get('favorite', False) else ''}{ab.get('name','')}  ({slot.title()} Ability)",
+                    "display": f"{'⭐ ' if ab.get('favorite', False) else ''}{ab.get('name','')}  (Ability:{slot})",
                 })
 
-        actions = sorted(actions, key=lambda a: (not a["favorite"], a["name"].lower(), a["kind"], a.get("slot", "")))
+        actions = sorted(actions, key=lambda a: (not a["favorite"], a["name"].lower(), a["kind"], a.get("slot") or ""))
         self.combat_actions = actions
 
         self.combat_list.delete(0, tk.END)
         for a in actions:
             self.combat_list.insert(tk.END, a["display"])
 
+        # restore selection
+        if keep_ref is not None:
+            for idx, a in enumerate(self.combat_actions):
+                if a["ref"] is keep_ref and a["kind"] == keep_kind:
+                    self.combat_list.selection_set(idx)
+                    self.combat_list.see(idx)
+                    break
+
     def on_combat_select(self):
         sel = list(self.combat_list.curselection())
         if len(sel) != 1:
-            self.combat_selected = None
+            self.combat_selected_ref = None
+            self.combat_selected_kind = None
             return
         idx = sel[0]
         if not (0 <= idx < len(self.combat_actions)):
-            self.combat_selected = None
+            self.combat_selected_ref = None
+            self.combat_selected_kind = None
             return
 
-        self.combat_selected = idx
         a = self.combat_actions[idx]
         ref = a["ref"]
 
-        self.var_combat_slot.set(a["display"].split("  (", 1)[-1].rstrip(")"))
+        self.combat_selected_ref = ref
+        self.combat_selected_kind = a["kind"]
+
         self.var_combat_roll_type.set(ref.get("roll_type", "None"))
         self.var_combat_damage_expr.set(ref.get("damage", ""))
 
@@ -777,13 +926,23 @@ class CharacterApp(tk.Tk):
         self.var_combat_roll_value.set("")
 
     def use_combat_action(self):
-        if self.combat_selected is None or not (0 <= self.combat_selected < len(self.combat_actions)):
-            messagebox.showinfo("Combat", "Select equipment or an ability first.")
+        if self.combat_selected_ref is None:
+            messagebox.showinfo("Combat", "Select an item or ability first.")
             return
 
-        a = self.combat_actions[self.combat_selected]
-        ref = a["ref"]
+        # find current selected action wrapper (because list can change)
+        chosen = None
+        for a in self.combat_actions:
+            if a["ref"] is self.combat_selected_ref and a["kind"] == self.combat_selected_kind:
+                chosen = a
+                break
+        if chosen is None:
+            messagebox.showinfo("Combat", "Selection is out of date. Hit Refresh list and re-select.")
+            return
 
+        ref = chosen["ref"]
+
+        # rolled dice total (sum of dice results)
         try:
             rolled = int(self.var_combat_roll_value.get().strip())
         except ValueError:
@@ -797,57 +956,81 @@ class CharacterApp(tk.Tk):
         else:
             dice_count, die_size, flat_bonus = parsed
 
-        # ---- Equipment: apply PBD scaling ----
-        if a["kind"] == "item":
-            try:
-                pbd = int(self.var_pbd.get().strip())
-            except ValueError:
-                pbd = 0
+        base = rolled + flat_bonus
 
-            max_roll = max(1, dice_count * die_size)
-            pct = clamp(rolled / max_roll, 0.0, 1.0)
-            max_factor = max_pbd_factor_for_die(die_size)
+        # -------- Items: use PBD scaling (if enabled on the item) --------
+        if chosen["kind"] == "item":
+            apply_pbd = bool(ref.get("apply_pbd", True))
+            pbd_add = 0
 
-            pbd_add = int(pbd * pct * max_factor)  # floor nerf
-            total = rolled + flat_bonus + pbd_add
+            if apply_pbd:
+                try:
+                    pbd = int(self.var_pbd.get().strip())
+                except ValueError:
+                    pbd = 0
 
-            pct_display = int(round(pct * 100))
-            self.var_combat_result.set(
-                f"Equipment: Rolled {rolled} ({pct_display}% of max {max_roll}) + flat {flat_bonus} "
-                f"+ PBD add {pbd_add}  →  Total {total}"
-            )
+                max_roll = max(1, dice_count * die_size)
+                pct = clamp(rolled / max_roll, 0.0, 1.0)
+                max_factor = max_pbd_factor_for_die(die_size)
+                pbd_add = int(pbd * pct * max_factor)
+
+                pct_display = int(round(pct * 100))
+                total = base + pbd_add
+                self.var_combat_result.set(
+                    f"Item: base {base} (rolled {rolled} + flat {flat_bonus}) "
+                    f"+ PBD add {pbd_add} ({pct_display}% of max {max_roll}, die d{die_size}, factor {max_factor:.2f}) "
+                    f"→ Total {total}"
+                )
+            else:
+                self.var_combat_result.set(f"Item: base {base} (rolled {rolled} + flat {flat_bonus}) → Total {base} (no PBD)")
+
             return
 
-        # ---- Ability: NO PBD, apply slot multipliers ----
-        slot = a.get("slot", "inner")
+        # -------- Abilities: NO PBD, slot multipliers + overcast --------
+        slot = chosen.get("slot", "inner")
         mods = ABILITY_MODS.get(slot, {"dmg": 1.0, "mana": 1.0})
         dmg_mult = mods["dmg"]
         mana_mult = mods["mana"]
 
-        base = rolled + flat_bonus
-        total = int(math.floor(base * dmg_mult))
+        # Base mana cost (required)
+        base_cost = int(ref.get("mana_cost", 0) or 0)
+        if base_cost <= 0:
+            messagebox.showwarning("Combat", "This ability has no mana_cost set (or it's 0). Set a base mana cost.")
+            return
 
-        # mana spend (effective)
+        # Spend input is BASE (pre-slot) spend
         try:
-            spend_base = int((self.var_combat_mana_spend.get().strip() or str(ref.get("mana_cost", 0))).strip())
+            spend_base = int((self.var_combat_mana_spend.get().strip() or str(base_cost)).strip())
         except ValueError:
-            spend_base = int(ref.get("mana_cost", 0) or 0)
+            spend_base = base_cost
 
-        spend_eff = int(math.ceil(spend_base * mana_mult))
+        if spend_base < base_cost:
+            messagebox.showwarning("Combat", f"Not enough mana allocated. Base cost is {base_cost}.")
+            return
+
+        base_eff = int(math.ceil(base_cost * mana_mult))
+        spent_eff = int(math.ceil(spend_base * mana_mult))
 
         try:
             cur_mana = int(self.var_mana_current.get())
         except ValueError:
             cur_mana = 0
 
-        if spend_eff > cur_mana:
-            messagebox.showwarning("Combat", f"Not enough mana. You have {cur_mana}, need {spend_eff} (slot-adjusted).")
+        if spent_eff > cur_mana:
+            messagebox.showwarning("Combat", f"Not enough mana. You have {cur_mana}, need {spent_eff} (slot-adjusted).")
             return
 
-        self.var_mana_current.set(str(cur_mana - spend_eff))
+        over_bonus = compute_overcast_bonus(base_eff, spent_eff, ref.get("overcast", {}))
+        total = int(math.floor((base + over_bonus) * dmg_mult))
+
+        # spend mana
+        self.var_mana_current.set(str(cur_mana - spent_eff))
+
+        ratio = spent_eff / base_eff if base_eff > 0 else 1.0
         self.var_combat_result.set(
-            f"{slot.title()} ability: (rolled {rolled} + flat {flat_bonus})={base} * {dmg_mult:.2f} → {total} damage. "
-            f"Mana: base {spend_base} * {mana_mult:.2f} → {spend_eff} spent."
+            f"{slot.title()} ability: base {base} (rolled {rolled} + flat {flat_bonus}), "
+            f"overcast +{over_bonus} (spent {spent_eff}/{base_eff}={ratio:.2f}x), "
+            f"*{dmg_mult:.2f} → {total}. Mana spent: {spent_eff}."
         )
 
     # ---------------- HP / Rest ----------------
@@ -890,7 +1073,7 @@ class CharacterApp(tk.Tk):
         talents = self.char.get("talents", {})
         if not isinstance(talents, dict):
             return
-        for _, tier in talents.items():
+        for tier_key, tier in talents.items():
             if not isinstance(tier, dict):
                 continue
             effects = tier.get("effects", [])
@@ -954,46 +1137,44 @@ class CharacterApp(tk.Tk):
         self.var_growth_current.set(str(growth.get("bound_current", 0)))
         self.var_growth_max.set(str(growth.get("bound_max", 0)))
 
-        # Inventory migration/load
+        # Inventory
         inv = c.get("inventory")
         if not isinstance(inv, dict):
             inv = {"equipment": [], "bag": [], "storage": []}
-            old_items = c.get("items", [])
-            if isinstance(old_items, list):
-                inv["bag"] = [ensure_item_obj(x) for x in old_items]
             c["inventory"] = inv
 
         for k in self.inv_keys:
             raw = inv.get(k, [])
             self.inv_data[k] = sort_favorites_first([ensure_item_obj(x) for x in (raw if isinstance(raw, list) else [])])
-            self.inv_selected_obj[k] = None
+            self.inv_selected_ref[k] = None
             self.inv_render(k)
 
             self.inv_roll_type[k].set("None")
             self.inv_damage[k].set("")
+            self.inv_apply_pbd[k].set(True)
             nb: tk.Text = getattr(self, f"inv_notes_box_{k}")
             nb.delete("1.0", tk.END)
 
-        # Abilities migration/load (also migrates old "spells" into inner by default)
-        abilities = c.get("abilities")
-        if not isinstance(abilities, dict):
-            abilities = {"core": [], "inner": [], "outer": []}
-
-            old_spells = c.get("spells", [])
-            if isinstance(old_spells, list) and old_spells:
-                abilities["inner"] = [ensure_ability_obj(x) for x in old_spells]
-
-            c["abilities"] = abilities
+        # Abilities
+        ab_all = c.get("abilities")
+        if not isinstance(ab_all, dict):
+            ab_all = {"core": [], "inner": [], "outer": []}
+            c["abilities"] = ab_all
 
         for slot in self.ability_keys:
-            raw = abilities.get(slot, [])
+            raw = ab_all.get(slot, [])
             self.abilities_data[slot] = sort_favorites_first([ensure_ability_obj(x) for x in (raw if isinstance(raw, list) else [])])
-            self.ability_selected_obj[slot] = None
+            self.ability_selected_ref[slot] = None
             self.ability_render(slot)
 
             self.ability_roll_type[slot].set("None")
             self.ability_damage[slot].set("")
             self.ability_mana_cost[slot].set("0")
+            self.ability_overcast_enabled[slot].set(False)
+            self.ability_overcast_scale[slot].set("0")
+            self.ability_overcast_power[slot].set("0.85")
+            self.ability_overcast_cap[slot].set("999")
+
             nb: tk.Text = getattr(self, f"ability_notes_box_{slot}")
             nb.delete("1.0", tk.END)
 
@@ -1070,11 +1251,12 @@ class CharacterApp(tk.Tk):
                     "roll_type": it.get("roll_type", "None"),
                     "damage": it.get("damage", ""),
                     "notes": it.get("notes", ""),
+                    "apply_pbd": bool(it.get("apply_pbd", True)),
                 })
             inv[k] = cleaned
 
         # Abilities save
-        abilities = c.setdefault("abilities", {"core": [], "inner": [], "outer": []})
+        ab_all = c.setdefault("abilities", {"core": [], "inner": [], "outer": []})
         for slot in self.ability_keys:
             cleaned = []
             for ab in self.abilities_data[slot]:
@@ -1087,9 +1269,10 @@ class CharacterApp(tk.Tk):
                     "roll_type": ab.get("roll_type", "None"),
                     "damage": ab.get("damage", ""),
                     "mana_cost": int(ab.get("mana_cost", 0) or 0),
+                    "overcast": ab.get("overcast", {"enabled": False, "scale": 0, "power": 0.85, "cap": 999}),
                     "notes": ab.get("notes", ""),
                 })
-            abilities[slot] = cleaned
+            ab_all[slot] = cleaned
 
         # Notes / world
         c["notes"] = self.notes_text.get("1.0", tk.END).rstrip("\n")
@@ -1113,24 +1296,24 @@ class CharacterApp(tk.Tk):
             lines.append("")
 
             trig = t1.get("trigger", {})
-            lines.append(f"Trigger ({trig.get('type', '')}): {trig.get('text', '')}")
+            lines.append(f"Trigger ({trig.get('type','')}): {trig.get('text','')}")
             lines.append("")
             lines.append("Effects:")
 
             for eff in t1.get("effects", []):
-                lines.append(f"  • {eff.get('name', 'Unnamed')}")
-                lines.append(f"    {eff.get('text', '')}")
+                lines.append(f"  • {eff.get('name','Unnamed')}")
+                lines.append(f"    {eff.get('text','')}")
                 if eff.get("uses"):
                     u = eff["uses"]
-                    lines.append(f"    Uses: {u.get('used', 0)}/{u.get('max', 1)} per {u.get('per', '')}")
+                    lines.append(f"    Uses: {u.get('used',0)}/{u.get('max',1)} per {u.get('per','')}")
                 lines.append("")
 
             if t1.get("mana_flair"):
                 mf = t1["mana_flair"]
                 lines.append("Mana Flair:")
-                lines.append(f"  Cost: {mf.get('cost', 0)} mana ({mf.get('timing', '')})")
-                lines.append(f"  {mf.get('text', '')}")
-                lines.append(f"  Limit: {mf.get('uses_per_round', 1)}/round")
+                lines.append(f"  Cost: {mf.get('cost',0)} mana ({mf.get('timing','')})")
+                lines.append(f"  {mf.get('text','')}")
+                lines.append(f"  Limit: {mf.get('uses_per_round',1)}/round")
 
             self.talent_text.insert(tk.END, "\n".join(lines))
 
@@ -1156,6 +1339,7 @@ class CharacterApp(tk.Tk):
         self.var_unspent.set(str(max(0, v)))
 
     def spend_points_for_mana_t1(self):
+        # unchanged: 1->1 under 50, else 3->2
         unspent = self._get_unspent()
         try:
             cur = int(self.var_mana_current.get())
@@ -1163,7 +1347,6 @@ class CharacterApp(tk.Tk):
         except ValueError:
             return
 
-        # unchanged
         cost, gain = (1, 1) if mx < 50 else (3, 2)
         if unspent < cost:
             messagebox.showwarning("Not enough points", f"Need {cost} point(s) for Mana at this cap.")
@@ -1185,9 +1368,7 @@ class CharacterApp(tk.Tk):
         except ValueError:
             return
 
-        # NEW: soft cap 100, +2 before 100, +1 after
-        gain = 2 if mx < 100 else 1
-
+        gain = T1_HP_GAIN_BEFORE_CAP if mx < T1_HP_SOFT_CAP else T1_HP_GAIN_AFTER_CAP
         self._set_unspent(unspent - 1)
         self.var_hp_max.set(str(mx + gain))
         self.var_hp_current.set(str(cur + gain))
@@ -1199,9 +1380,10 @@ class CharacterApp(tk.Tk):
         except ValueError:
             return
 
-        # NEW: 3 points -> +1 PBD, soft cap 15 (after: 6 -> +1)
-        cost = 3 if pbd < 15 else 6
-        gain = 1
+        if pbd < T1_PBD_SOFT_CAP:
+            cost, gain = (T1_PBD_COST_BEFORE_CAP, T1_PBD_GAIN_BEFORE_CAP)
+        else:
+            cost, gain = (T1_PBD_COST_AFTER_CAP, T1_PBD_GAIN_AFTER_CAP)
 
         if unspent < cost:
             messagebox.showwarning("Not enough points", f"Need {cost} point(s) for PBD at this cap.")
@@ -1209,6 +1391,27 @@ class CharacterApp(tk.Tk):
 
         self._set_unspent(unspent - cost)
         self.var_pbd.set(str(pbd + gain))
+
+    def _build_damage_lab_tab(self):
+        self.damage_lab = DamageLabTab(
+            self.tab_damage_lab,
+            get_actions=self._damage_lab_get_actions,
+            get_pbd=self._damage_lab_get_pbd,
+        )
+        self.damage_lab.pack(fill=tk.BOTH, expand=True)
+
+    def _damage_lab_get_actions(self):
+        # ensure it's always fresh + sorted
+        self.refresh_combat_list()
+        return self.combat_actions
+
+    def _damage_lab_get_pbd(self):
+        try:
+            return int(self.var_pbd.get().strip())
+        except ValueError:
+            return 0
+
+
 
     # ---------------- Save ----------------
 
