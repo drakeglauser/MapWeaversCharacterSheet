@@ -1,7 +1,9 @@
 import json
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk, messagebox
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+
 from damage_lab import DamageLabTab
 import re
 import math
@@ -118,22 +120,83 @@ def compute_overcast_bonus(base_cost_eff: int, spent_eff: int, over: dict) -> in
         bonus = min(bonus, cap)
     return max(0, bonus)
 
-
-CHAR_PATH = Path("joe.json")
 ROLL_TYPES = ["None", "Attack", "Save", "Check"]
 
 
-def load_character(path=CHAR_PATH):
-    if not path.exists():
+def default_character_template(name="New Hero"):
+    return {
+        "name": name,
+        "tier": "T1",
+        "resources": {
+            "hp": {"current": 20, "max": 20},
+            "mana": {"current": 10, "max": 10},
+            "pbd": 0,
+            "unspent_points": 0
+        },
+        "stats": {"str": 10, "dex": 10, "con": 10, "int": 10, "wis": 10, "cha": 10, "san": 10, "hnr": 10},
+        "skills": {
+            "core": {"current": 0, "max": 2},
+            "inner": {"current": 0, "max": 5},
+            "outer": {"current": 0, "max": 9},
+        },
+        "growth_items": {"bound_current": 0, "bound_max": 4},
+        "inventory": {"equipment": [], "bag": [], "storage": []},
+        "abilities": {"core": [], "inner": [], "outer": []},
+        "notes": "",
+        "world_info": "",
+        "talents": {}
+    }
+
+
+def pick_character_file():
+    """
+    Returns Path or None (if user cancels / exits).
+    """
+    # Needs a root for dialogs, but we don't want a blank window yet.
+    root = tk.Tk()
+    root.withdraw()
+
+    choice = messagebox.askyesnocancel(
+        "Open Character",
+        "Yes = Open existing character JSON\nNo = Create a new character JSON\nCancel = Exit"
+    )
+
+    path = None
+
+    if choice is True:
+        p = filedialog.askopenfilename(
+            title="Open character JSON",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+        if p:
+            path = Path(p)
+
+    elif choice is False:
+        p = filedialog.asksaveasfilename(
+            title="Create new character JSON",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+        if p:
+            path = Path(p)
+            # write a starter file immediately
+            save_character(default_character_template(), path)
+
+    root.destroy()
+    return path
+
+def load_character(path: Path):
+    if not path or not path.exists():
         messagebox.showerror("Error", f"Character file not found: {path}")
         raise SystemExit(1)
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def save_character(char, path=CHAR_PATH):
+def save_character(char, path: Path):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(char, f, indent=2)
+
 
 
 def find_show_must_go_on(char):
@@ -224,13 +287,16 @@ def ensure_ability_obj(x):
 
 
 class CharacterApp(tk.Tk):
-    def __init__(self):
+    
+    def __init__(self, char_path: Path):
         super().__init__()
 
-        self.title("Homebrew Character Sheet")
+        self.char_path = char_path
+        self.title(f"Homebrew Character Sheet — {self.char_path.name}")
         self.geometry("1150x750")
 
-        self.char = load_character()
+        self.char = load_character(self.char_path)
+
 
         # ----- Vars -----
         self.var_name = tk.StringVar()
@@ -666,7 +732,7 @@ class CharacterApp(tk.Tk):
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        lb = tk.Listbox(left, height=18)
+        lb = tk.Listbox(left, height=18, exportselection=False)
         lb.pack(fill=tk.BOTH, expand=True)
         lb.bind("<Double-Button-1>", lambda _e, k=key: self.ability_toggle_favorite(k))
         lb.bind("<<ListboxSelect>>", lambda _e, k=key: self.ability_on_select(k))
@@ -771,11 +837,12 @@ class CharacterApp(tk.Tk):
         lb: tk.Listbox = getattr(self, f"ability_list_{key}")
         sel = list(lb.curselection())
         if len(sel) != 1:
-            self.ability_selected_ref[key] = None
             return
+
         idx = sel[0]
         ab = self.abilities_data[key][idx]
         self.ability_selected_ref[key] = ab
+
 
         self.ability_roll_type[key].set(ab.get("roll_type", "None"))
         self.ability_damage[key].set(ab.get("damage", ""))
@@ -1417,10 +1484,15 @@ class CharacterApp(tk.Tk):
 
     def on_save(self):
         self.apply_to_model()
-        save_character(self.char)
-        messagebox.showinfo("Saved", f"Saved to {CHAR_PATH.name}")
+        save_character(self.char, self.char_path)
+        messagebox.showinfo("Saved", f"Saved to {self.char_path.name}")
+
 
 
 if __name__ == "__main__":
-    app = CharacterApp()
+    path = pick_character_file()
+    if not path:
+        sys.exit(0)
+
+    app = CharacterApp(path)
     app.mainloop()
