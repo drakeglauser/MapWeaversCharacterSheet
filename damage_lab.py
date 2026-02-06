@@ -41,6 +41,17 @@ def parse_damage_expr(expr: str):
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
+def mana_density_multiplier(points: int) -> float:
+    try:
+        p = int(points)
+    except Exception:
+        p = 0
+    p = max(0, p)
+
+    if p <= 100:
+        return 1.0 + (p / 100.0)
+
+    return 2.0 + (math.log(p / 100.0) / math.log(100.0))
 
 def max_pbd_factor_for_die(die_size: int) -> float:
     """
@@ -104,10 +115,11 @@ class DamageLabTab(ttk.Frame):
          each action dict must include: kind ('item' or 'ability'), ref (dict), display, slot (for abilities)
       get_pbd(): returns current PBD int from app
     """
-    def __init__(self, parent, get_actions, get_pbd):
+    def __init__(self, parent, get_actions, get_pbd, get_mana_density):
         super().__init__(parent)
         self.get_actions = get_actions
         self.get_pbd = get_pbd
+        self.get_mana_density = get_mana_density
 
         self.actions = []
         self.selected_ref = None
@@ -312,11 +324,19 @@ class DamageLabTab(ttk.Frame):
 
             base_eff = int(math.ceil(base_cost * mana_mult))
             spent_eff = int(math.ceil(mana_spend_base * mana_mult))
+            md_pts = 0
+            try:
+                md_pts = int(self.get_mana_density() or 0)
+            except Exception:
+                md_pts = 0
+            md_mult = mana_density_multiplier(md_pts)
+
 
             over = ref.get("overcast", {}) if isinstance(ref.get("overcast", {}), dict) else {}
             over_bonus = compute_overcast_bonus(base_eff, spent_eff, over)
 
-            total = int(math.floor((base + over_bonus) * dmg_mult))
+            total = int(math.floor((base + over_bonus) * dmg_mult * md_mult))
+
 
         # Target multiplier (resist/weak/vuln)
         total = int(math.floor(total * self._get_target_mult()))
