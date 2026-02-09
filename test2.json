@@ -1,0 +1,60 @@
+{
+  "name": "New Hero",
+  "tier": "T1",
+  "resources": {
+    "hp": {
+      "current": 20,
+      "max": 20
+    },
+    "mana": {
+      "current": 10,
+      "max": 10
+    },
+    "pbd": 0,
+    "mana_density": 0,
+    "unspent_points": 0
+  },
+  "stats": {
+    "melee_acc": 5,
+    "ranged_acc": 5,
+    "precision": 5,
+    "spellcraft": 5,
+    "phys_def": 5,
+    "evasion": 5,
+    "wis_def": 5,
+    "utility": 5,
+    "agility": 5,
+    "strength": 5
+  },
+  "skills": {
+    "core": {
+      "current": 0,
+      "max": 2
+    },
+    "inner": {
+      "current": 0,
+      "max": 5
+    },
+    "outer": {
+      "current": 0,
+      "max": 9
+    }
+  },
+  "growth_items": {
+    "bound_current": 0,
+    "bound_max": 4
+  },
+  "inventory": {
+    "equipment": [],
+    "bag": [],
+    "storage": []
+  },
+  "abilities": {
+    "core": [],
+    "inner": [],
+    "outer": []
+  },
+  "notes": "",
+  "world_info": "",
+  "talents": {}
+}

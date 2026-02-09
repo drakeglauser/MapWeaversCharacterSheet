@@ -1,0 +1,72 @@
+{
+  "name": "New Hero",
+  "tier": "T1",
+  "resources": {
+    "hp": {
+      "current": 20,
+      "max": 20
+    },
+    "mana": {
+      "current": 10,
+      "max": 10
+    },
+    "pbd": 0,
+    "unspent_points": 0
+  },
+  "stats": {
+    "str": 10,
+    "dex": 10,
+    "con": 10,
+    "int": 10,
+    "wis": 10,
+    "cha": 10,
+    "san": 10,
+    "hnr": 10
+  },
+  "skills": {
+    "core": {
+      "current": 0,
+      "max": 0
+    },
+    "inner": {
+      "current": 0,
+      "max": 0
+    },
+    "outer": {
+      "current": 0,
+      "max": 0
+    }
+  },
+  "growth_items": {
+    "bound_current": 0,
+    "bound_max": 0
+  },
+  "inventory": {
+    "equipment": [],
+    "bag": [],
+    "storage": []
+  },
+  "abilities": {
+    "core": [
+      {
+        "name": "spark",
+        "favorite": false,
+        "roll_type": "Attack",
+        "damage": "1d4",
+        "mana_cost": 1,
+        "overcast": {
+          "enabled": true,
+          "scale": 2,
+          "power": 0.85,
+          "cap": 999
+        },
+        "notes": "Summon a small spark of flame and throw it to burn your enemies"
+      }
+    ],
+    "inner": [],
+    "outer": []
+  },
+  "notes": "",
+  "world_info": "",
+  "talents": {}
+}

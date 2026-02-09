@@ -1,6 +1,7 @@
 # character_sheet.py
 import json
 import math
+import random
 import re
 import sys
 from pathlib import Path
@@ -68,6 +69,117 @@ ABILITY_MODS = {
     "core":  {"dmg": 1.50, "mana": 0.75},
     "inner": {"dmg": 1.00, "mana": 1.00},
     "outer": {"dmg": 0.75, "mana": 2.00},
+}
+
+# -------- Spell Generation System --------
+
+SPELL_ARCHETYPES = {
+    "offensive": {
+        "roll_types": ["Attack", "Save"],
+        "power_weight": 1.0,
+        "mana_weight": 1.0,
+    },
+    "defensive": {
+        "roll_types": ["None"],
+        "power_weight": 0.6,
+        "mana_weight": 0.8,
+    },
+    "utility": {
+        "roll_types": ["None", "Check"],
+        "power_weight": 0.4,
+        "mana_weight": 0.7,
+    },
+    "buff": {
+        "roll_types": ["None"],
+        "power_weight": 0.7,
+        "mana_weight": 1.2,
+    },
+    "debuff": {
+        "roll_types": ["Save", "Check"],
+        "power_weight": 0.8,
+        "mana_weight": 0.9,
+    },
+}
+
+SPELL_ELEMENTS = {
+    "fire": {"adjectives": ["Blazing", "Scorching", "Infernal", "Searing"], "nouns": ["Flame", "Ember", "Conflagration", "Pyre"]},
+    "ice": {"adjectives": ["Frozen", "Chilling", "Glacial", "Arctic"], "nouns": ["Frost", "Shard", "Blizzard", "Crystal"]},
+    "lightning": {"adjectives": ["Electric", "Thunderous", "Crackling", "Shocking"], "nouns": ["Bolt", "Storm", "Arc", "Spark"]},
+    "arcane": {"adjectives": ["Mystical", "Ethereal", "Eldritch", "Runic"], "nouns": ["Missile", "Orb", "Beam", "Pulse"]},
+    "shadow": {"adjectives": ["Dark", "Umbral", "Void", "Tenebrous"], "nouns": ["Shroud", "Tendril", "Veil", "Curse"]},
+    "light": {"adjectives": ["Radiant", "Holy", "Brilliant", "Sacred"], "nouns": ["Ray", "Lance", "Blessing", "Aura"]},
+    "nature": {"adjectives": ["Verdant", "Primal", "Wild", "Living"], "nouns": ["Vine", "Thorn", "Growth", "Wrath"]},
+    "force": {"adjectives": ["Telekinetic", "Kinetic", "Crushing", "Pushing"], "nouns": ["Blast", "Wave", "Hammer", "Shield"]},
+    "healing": {"adjectives": ["Soothing", "Regenerative", "Vital", "Mending"], "nouns": ["Touch", "Word", "Light", "Spring"]},
+    "psychic": {"adjectives": ["Mental", "Psionic", "Mind", "Cerebral"], "nouns": ["Blast", "Spike", "Whisper", "Scream"]},
+}
+
+SPELL_ACTIONS = {
+    "offensive": ["Strike", "Blast", "Bolt", "Lance", "Storm", "Barrage", "Burst"],
+    "defensive": ["Shield", "Ward", "Barrier", "Wall", "Aegis", "Protection"],
+    "utility": ["Sense", "Detection", "Vision", "Manipulation", "Channel"],
+    "buff": ["Enhancement", "Empowerment", "Blessing", "Invigoration", "Fortification"],
+    "debuff": ["Curse", "Hex", "Bane", "Weakness", "Drain"],
+}
+
+TIER_DICE = {
+    "T1": {"min": 4, "max": 6, "count_range": (1, 2)},
+    "T2": {"min": 6, "max": 8, "count_range": (1, 3)},
+    "T3": {"min": 8, "max": 12, "count_range": (2, 4)},
+    "T4": {"min": 10, "max": 20, "count_range": (2, 5)},
+}
+
+DEFAULT_TIER_DICE = {"min": 4, "max": 6, "count_range": (1, 2)}
+
+KEYWORD_TO_ELEMENT = {
+    # Fire family
+    "fire": "fire", "flame": "fire", "burn": "fire", "heat": "fire", "inferno": "fire",
+    "ignite": "fire", "scorch": "fire", "blaze": "fire",
+    # Ice family
+    "ice": "ice", "frost": "ice", "cold": "ice", "freeze": "ice", "chill": "ice",
+    "snow": "ice", "winter": "ice", "glacial": "ice",
+    # Lightning family
+    "lightning": "lightning", "thunder": "lightning", "electric": "lightning",
+    "shock": "lightning", "storm": "lightning", "spark": "lightning",
+    # Arcane family
+    "magic": "arcane", "arcane": "arcane", "mystical": "arcane", "ethereal": "arcane",
+    "mana": "arcane", "spell": "arcane", "rune": "arcane",
+    # Shadow family
+    "shadow": "shadow", "dark": "shadow", "darkness": "shadow", "void": "shadow",
+    "curse": "shadow", "necrotic": "shadow", "death": "shadow",
+    # Light family
+    "light": "light", "holy": "light", "radiant": "light", "divine": "light",
+    "sacred": "light", "celestial": "light", "sun": "light",
+    # Nature family
+    "nature": "nature", "plant": "nature", "earth": "nature", "wood": "nature",
+    "vine": "nature", "thorn": "nature", "druid": "nature", "wild": "nature",
+    # Force family
+    "force": "force", "kinetic": "force", "telekinetic": "force", "push": "force",
+    "pull": "force", "gravity": "force",
+    # Healing family
+    "heal": "healing", "cure": "healing", "restore": "healing", "mend": "healing",
+    "regenerate": "healing", "recovery": "healing", "life": "healing",
+    # Psychic family
+    "mind": "psychic", "psychic": "psychic", "mental": "psychic", "telepathy": "psychic",
+    "illusion": "psychic", "thought": "psychic",
+}
+
+KEYWORD_TO_ARCHETYPE = {
+    # Offensive
+    "attack": "offensive", "damage": "offensive", "hurt": "offensive", "kill": "offensive",
+    "blast": "offensive", "strike": "offensive", "offensive": "offensive", "combat": "offensive",
+    # Defensive
+    "defense": "defensive", "defend": "defensive", "protect": "defensive", "shield": "defensive",
+    "block": "defensive", "ward": "defensive", "barrier": "defensive", "armor": "defensive",
+    # Utility
+    "utility": "utility", "detect": "utility", "sense": "utility", "explore": "utility",
+    "manipulate": "utility", "tool": "utility", "skill": "utility",
+    # Buff
+    "buff": "buff", "enhance": "buff", "strengthen": "buff", "empower": "buff",
+    "boost": "buff", "improve": "buff", "augment": "buff",
+    # Debuff
+    "debuff": "debuff", "weaken": "debuff", "hinder": "debuff", "slow": "debuff",
+    "curse": "debuff", "hex": "debuff", "impair": "debuff",
 }
 
 TARGET_MULTS = {
@@ -384,6 +496,250 @@ def find_show_must_go_on(char):
         if eff.get("id") == "show_must_go_on":
             return eff
     return None
+
+
+# ---------------- Spell Generation Functions ----------------
+
+def parse_research_prompt(prompt: str) -> dict:
+    """
+    Extract spell generation hints from user prompt.
+
+    Returns dict with:
+        - elements: list of matching elements (default ["arcane"])
+        - archetypes: list of matching archetypes (default ["offensive", "utility"])
+        - keywords: raw words from prompt
+    """
+    prompt_lower = prompt.lower()
+    words = re.findall(r'\w+', prompt_lower)
+
+    elements = []
+    archetypes = []
+
+    for word in words:
+        if word in KEYWORD_TO_ELEMENT:
+            elem = KEYWORD_TO_ELEMENT[word]
+            if elem not in elements:
+                elements.append(elem)
+
+        if word in KEYWORD_TO_ARCHETYPE:
+            arch = KEYWORD_TO_ARCHETYPE[word]
+            if arch not in archetypes:
+                archetypes.append(arch)
+
+    # Defaults if nothing detected
+    if not elements:
+        elements = ["arcane", "force"]
+    if not archetypes:
+        archetypes = ["offensive", "utility"]
+
+    return {
+        "elements": elements,
+        "archetypes": archetypes,
+        "keywords": words,
+    }
+
+
+def generate_spell_name(element: str, archetype: str) -> str:
+    """
+    Generate creative spell name from element + archetype.
+
+    Patterns:
+        1. [Adjective] [Action]
+        2. [Element Noun] [Action]
+        3. [Adjective] [Element Noun]
+    """
+    elem_data = SPELL_ELEMENTS.get(element, SPELL_ELEMENTS["arcane"])
+    actions = SPELL_ACTIONS.get(archetype, SPELL_ACTIONS["offensive"])
+
+    pattern = random.choice([1, 2, 3])
+
+    if pattern == 1:
+        # "Blazing Strike", "Frozen Shield"
+        adj = random.choice(elem_data["adjectives"])
+        action = random.choice(actions)
+        return f"{adj} {action}"
+
+    elif pattern == 2:
+        # "Flame Bolt", "Frost Ward"
+        noun = random.choice(elem_data["nouns"])
+        action = random.choice(actions)
+        return f"{noun} {action}"
+
+    else:  # pattern == 3
+        # "Searing Flame", "Chilling Frost"
+        adj = random.choice(elem_data["adjectives"])
+        noun = random.choice(elem_data["nouns"])
+        return f"{adj} {noun}"
+
+
+def calculate_spell_stats(archetype: str, tier: str, category: str, mana_density: int) -> dict:
+    """
+    Calculate balanced spell stats.
+
+    Returns dict with:
+        - damage: dice expression string
+        - mana_cost: int
+        - roll_type: str
+        - overcast: dict (optional)
+    """
+    # Get tier dice info
+    tier_info = TIER_DICE.get(tier, DEFAULT_TIER_DICE)
+    archetype_data = SPELL_ARCHETYPES.get(archetype, SPELL_ARCHETYPES["offensive"])
+
+    # Get category modifiers
+    cat_mods = ABILITY_MODS.get(category, ABILITY_MODS["inner"])
+
+    # Calculate dice
+    dice_count = random.randint(*tier_info["count_range"])
+    dice_size = random.choice([d for d in [4, 6, 8, 10, 12, 20]
+                                if tier_info["min"] <= d <= tier_info["max"]])
+
+    # Flat bonus based on tier
+    flat_bonus = random.randint(0, dice_count)
+
+    # Apply archetype power scaling
+    if archetype_data["power_weight"] < 1.0:
+        # Reduce dice for defensive/utility
+        if random.random() > archetype_data["power_weight"]:
+            dice_count = max(1, dice_count - 1)
+
+    # Build damage expression
+    damage = f"{dice_count}d{dice_size}"
+    if flat_bonus > 0:
+        damage += f"+{flat_bonus}"
+
+    # Calculate mana cost
+    # Base: avg damage * category mana mod * archetype mana weight
+    avg_dmg = dice_count * (dice_size / 2 + 0.5) + flat_bonus
+    base_mana = int(avg_dmg * cat_mods["mana"] * archetype_data["mana_weight"])
+
+    # Add randomness (±20%)
+    mana_variance = int(base_mana * 0.2)
+    mana_cost = max(1, base_mana + random.randint(-mana_variance, mana_variance))
+
+    # Roll type
+    roll_type = random.choice(archetype_data["roll_types"])
+
+    # Overcast (30% chance for offensive spells)
+    overcast = {"enabled": False, "scale": 0, "power": 0.85, "cap": 999}
+    if archetype == "offensive" and random.random() < 0.3:
+        overcast["enabled"] = True
+        overcast["scale"] = random.randint(2, 5)
+        overcast["cap"] = dice_count * dice_size * 2  # reasonable cap
+
+    return {
+        "damage": damage if roll_type in ["Attack", "Save"] else "",
+        "mana_cost": mana_cost,
+        "roll_type": roll_type,
+        "overcast": overcast,
+    }
+
+
+def generate_spell_description(name: str, element: str, archetype: str, stats: dict) -> str:
+    """
+    Generate flavorful but concise spell description.
+    """
+    # Templates by archetype
+    templates = {
+        "offensive": [
+            f"Channel {element} energy into a devastating attack.",
+            f"Unleash a {element}-infused strike against your foes.",
+            f"Project destructive {element} force at your target.",
+        ],
+        "defensive": [
+            f"Conjure a protective {element} barrier around yourself or an ally.",
+            f"Summon {element} energy to deflect incoming harm.",
+            f"Create a defensive shield woven from {element} magic.",
+        ],
+        "utility": [
+            f"Manipulate {element} to achieve practical effects.",
+            f"Harness {element} magic for problem-solving.",
+            f"Channel {element} energy in a focused, controlled manner.",
+        ],
+        "buff": [
+            f"Infuse yourself or an ally with empowering {element} energy.",
+            f"Enhance capabilities through {element} magic.",
+            f"Bestow a blessing of {element} upon your target.",
+        ],
+        "debuff": [
+            f"Afflict your enemy with weakening {element} magic.",
+            f"Curse your foe with the power of {element}.",
+            f"Sap your target's strength using {element} energy.",
+        ],
+    }
+
+    base = random.choice(templates.get(archetype, templates["offensive"]))
+
+    # Add stat hint
+    if stats["damage"]:
+        base += f" Deals {stats['damage']} damage."
+
+    if stats["mana_cost"] > 0:
+        base += f" Costs {stats['mana_cost']} mana."
+
+    return base
+
+
+def generate_spell_options(prompt_data: dict, category: str, tier: str,
+                          mana_density: int, char_stats: dict) -> list:
+    """
+    Generate 5 varied spell options.
+
+    Args:
+        prompt_data: from parse_research_prompt()
+        category: "core", "inner", or "outer"
+        tier: "T1", "T2", etc.
+        mana_density: character's mana density value
+        char_stats: character's stats dict (for future enhancements)
+
+    Returns:
+        List of 5 spell dicts ready to pass to ensure_ability_obj()
+    """
+    elements = prompt_data["elements"]
+    archetypes = prompt_data["archetypes"]
+
+    spells = []
+
+    # Strategy: ensure variety
+    # Expand archetype pool to ensure variety
+    all_archetypes = list(SPELL_ARCHETYPES.keys())
+    archetype_pool = archetypes.copy()
+
+    # Add some random archetypes for variety
+    while len(archetype_pool) < 5:
+        extra = random.choice(all_archetypes)
+        if extra not in archetype_pool:
+            archetype_pool.append(extra)
+
+    # Generate 5 spells
+    for i in range(5):
+        # Pick element and archetype
+        element = random.choice(elements)
+        archetype = archetype_pool[i % len(archetype_pool)]
+
+        # Generate name
+        name = generate_spell_name(element, archetype)
+
+        # Calculate stats
+        stats = calculate_spell_stats(archetype, tier, category, mana_density)
+
+        # Generate description
+        description = generate_spell_description(name, element, archetype, stats)
+
+        # Build spell dict
+        spell = {
+            "name": name,
+            "favorite": False,
+            "roll_type": stats["roll_type"],
+            "damage": stats["damage"],
+            "mana_cost": stats["mana_cost"],
+            "notes": description,
+            "overcast": stats["overcast"],
+        }
+
+        spells.append(spell)
+
+    return spells
 
 
 # ---------------- App ----------------
@@ -1089,6 +1445,7 @@ class CharacterApp(tk.Tk):
         ttk.Entry(controls, textvariable=self.var_new_ability_name[key]).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(controls, text="Add", command=lambda k=key: self.ability_add(k)).pack(side=tk.LEFT, padx=6)
         ttk.Button(controls, text="Remove", command=lambda k=key: self.ability_remove(k)).pack(side=tk.LEFT)
+        ttk.Button(controls, text="Generate", command=lambda k=key: self.spell_generate_dialog(k)).pack(side=tk.LEFT, padx=6)
         ttk.Button(controls, text="Toggle ⭐", command=lambda k=key: self.ability_toggle_favorite(k)).pack(side=tk.LEFT, padx=6)
 
         details = ttk.LabelFrame(right, text="Selected Ability (combat info)")
@@ -1370,6 +1727,195 @@ class CharacterApp(tk.Tk):
         self.ability_render(from_slot)
         self.ability_render(to_slot)
         self.refresh_combat_list()
+
+    def spell_generate_dialog(self, key: str):
+        """
+        Open dialog for generating spell options based on research prompt.
+
+        Args:
+            key: ability category ("core", "inner", or "outer")
+        """
+        win = tk.Toplevel(self)
+        win.title(f"Generate Spell → {key}")
+        win.geometry("700x650")
+        win.transient(self)
+        win.grab_set()
+
+        # Status message
+        status = tk.StringVar(value="")
+
+        # Prompt input
+        prompt_frame = ttk.LabelFrame(win, text="Research Prompt")
+        prompt_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+
+        ttk.Label(
+            prompt_frame,
+            text="Describe what your character has been researching or training:",
+            font=("TkDefaultFont", 9, "italic"),
+            foreground="gray"
+        ).pack(anchor="w", padx=8, pady=(4, 2))
+
+        prompt_text = tk.Text(prompt_frame, wrap="word", height=4)
+        prompt_text.pack(fill=tk.X, padx=8, pady=(0, 8))
+        prompt_text.insert("1.0", "I practiced fire magic to attack enemies...")
+
+        # Generation button
+        gen_btn_frame = ttk.Frame(win)
+        gen_btn_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        # Options listbox
+        options_frame = ttk.LabelFrame(win, text="Generated Options")
+        options_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        options_list = tk.Listbox(options_frame, height=5, exportselection=False)
+        options_list.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        # Store generated spells
+        generated_spells = []
+
+        # Edit frame (shows selected spell details)
+        edit_frame = ttk.LabelFrame(win, text="Edit Selected Spell")
+        edit_frame.pack(fill=tk.BOTH, padx=10, pady=5)
+
+        # Edit fields
+        name_var = tk.StringVar()
+        roll_type_var = tk.StringVar(value="None")
+        damage_var = tk.StringVar()
+        mana_var = tk.StringVar(value="0")
+        overcast_enabled_var = tk.BooleanVar(value=False)
+        overcast_scale_var = tk.StringVar(value="0")
+
+        ttk.Label(edit_frame, text="Name:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(edit_frame, textvariable=name_var, width=40).grid(row=0, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(edit_frame, text="Roll Type:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        ttk.Combobox(edit_frame, values=ROLL_TYPES, textvariable=roll_type_var, state="readonly", width=15).grid(
+            row=1, column=1, sticky="w", padx=6, pady=4
+        )
+
+        ttk.Label(edit_frame, text="Damage:").grid(row=2, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(edit_frame, textvariable=damage_var, width=20).grid(row=2, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(edit_frame, text="Mana Cost:").grid(row=3, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(edit_frame, textvariable=mana_var, width=10).grid(row=3, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Checkbutton(edit_frame, text="Enable Overcast", variable=overcast_enabled_var).grid(
+            row=4, column=0, columnspan=2, sticky="w", padx=6, pady=4
+        )
+
+        ttk.Label(edit_frame, text="Overcast Scale:").grid(row=5, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(edit_frame, textvariable=overcast_scale_var, width=10).grid(row=5, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(edit_frame, text="Description:").grid(row=6, column=0, sticky="nw", padx=6, pady=4)
+        notes_box = tk.Text(edit_frame, wrap="word", height=4)
+        notes_box.grid(row=6, column=1, sticky="nsew", padx=6, pady=4)
+
+        edit_frame.grid_rowconfigure(6, weight=1)
+        edit_frame.grid_columnconfigure(1, weight=1)
+
+        # Functions
+        def on_generate():
+            prompt = prompt_text.get("1.0", tk.END).strip()
+            if not prompt:
+                status.set("Please enter a research prompt.")
+                return
+
+            # Parse prompt
+            prompt_data = parse_research_prompt(prompt)
+
+            # Get character context
+            tier = self.var_tier.get() or "T1"
+            try:
+                mana_density = int(self.var_mana_density.get() or "0")
+            except ValueError:
+                mana_density = 0
+
+            char_stats = {k: int(self.var_stats[k].get() or "0") for k in STAT_KEYS}
+
+            # Generate spells
+            nonlocal generated_spells
+            generated_spells = generate_spell_options(
+                prompt_data, key, tier, mana_density, char_stats
+            )
+
+            # Populate listbox
+            options_list.delete(0, tk.END)
+            for spell in generated_spells:
+                display = f"{spell['name']} ({spell['roll_type']}, {spell['mana_cost']} mana)"
+                options_list.insert(tk.END, display)
+
+            status.set(f"Generated {len(generated_spells)} spell options.")
+
+        def on_select(event):
+            sel = list(options_list.curselection())
+            if len(sel) != 1:
+                return
+
+            idx = sel[0]
+            if 0 <= idx < len(generated_spells):
+                spell = generated_spells[idx]
+
+                # Populate edit fields
+                name_var.set(spell["name"])
+                roll_type_var.set(spell["roll_type"])
+                damage_var.set(spell["damage"])
+                mana_var.set(str(spell["mana_cost"]))
+
+                overcast = spell.get("overcast", {})
+                overcast_enabled_var.set(bool(overcast.get("enabled", False)))
+                overcast_scale_var.set(str(overcast.get("scale", 0)))
+
+                notes_box.delete("1.0", tk.END)
+                notes_box.insert("1.0", spell.get("notes", ""))
+
+        def on_add():
+            if not generated_spells:
+                status.set("Generate spells first.")
+                return
+
+            sel = list(options_list.curselection())
+            if len(sel) != 1:
+                status.set("Select a spell to add.")
+                return
+
+            idx = sel[0]
+            spell = generated_spells[idx].copy()
+
+            # Update from edit fields
+            spell["name"] = name_var.get().strip()
+            spell["roll_type"] = roll_type_var.get()
+            spell["damage"] = damage_var.get().strip()
+            try:
+                spell["mana_cost"] = int(mana_var.get() or "0")
+            except ValueError:
+                spell["mana_cost"] = 0
+
+            spell["overcast"]["enabled"] = bool(overcast_enabled_var.get())
+            try:
+                spell["overcast"]["scale"] = int(overcast_scale_var.get() or "0")
+            except ValueError:
+                spell["overcast"]["scale"] = 0
+
+            spell["notes"] = notes_box.get("1.0", tk.END).rstrip("\n")
+
+            # Add to character
+            self.abilities_data[key].append(ensure_ability_obj(spell))
+            self.ability_render(key)
+
+            status.set(f"Added '{spell['name']}' to {key} abilities.")
+
+        # Bind selection
+        options_list.bind("<<ListboxSelect>>", on_select)
+
+        # Buttons
+        ttk.Button(gen_btn_frame, text="Generate Options", command=on_generate).pack(side=tk.LEFT, padx=4)
+        ttk.Label(gen_btn_frame, textvariable=status, foreground="gray").pack(side=tk.LEFT, padx=10)
+
+        bottom_btns = ttk.Frame(win)
+        bottom_btns.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+        ttk.Button(bottom_btns, text="Add to Character", command=on_add).pack(side=tk.LEFT)
+        ttk.Button(bottom_btns, text="Close", command=win.destroy).pack(side=tk.RIGHT)
 
 
     # ---------------- Notes / World ----------------
