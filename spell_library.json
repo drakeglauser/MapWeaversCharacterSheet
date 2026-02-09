@@ -1,0 +1,54 @@
+{
+  "spells": [
+    {
+      "id": "20260209_004650_831175",
+      "spell": {
+        "name": "Infernal Barrier",
+        "favorite": false,
+        "roll_type": "None",
+        "damage": "",
+        "mana_cost": 2,
+        "notes": "Conjure a protective fire barrier around yourself or an ally. Costs 2 mana.",
+        "overcast": {
+          "enabled": false,
+          "scale": 0,
+          "power": 0.85,
+          "cap": 999
+        }
+      },
+      "metadata": {
+        "date_created": "2026-02-09T00:46:50.098026",
+        "source_character": "New Hero",
+        "element": "unknown",
+        "archetype": "unknown",
+        "tier": "T1",
+        "category": "core"
+      }
+    },
+    {
+      "id": "20260209_012236_9eb1b8",
+      "spell": {
+        "name": "Eldritch Missile",
+        "favorite": false,
+        "roll_type": "Save",
+        "damage": "1d4+2",
+        "mana_cost": 3,
+        "notes": "Curse your foe with the power of arcane. Deals 1d4+2 damage. Costs 3 mana.",
+        "overcast": {
+          "enabled": false,
+          "scale": 0,
+          "power": 0.85,
+          "cap": 999
+        }
+      },
+      "metadata": {
+        "date_created": "2026-02-09T01:22:36.557741",
+        "source_character": "New Hero",
+        "element": "unknown",
+        "archetype": "unknown",
+        "tier": "T1",
+        "category": "core"
+      }
+    }
+  ]
+}

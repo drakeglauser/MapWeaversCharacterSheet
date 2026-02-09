@@ -4,9 +4,18 @@ import math
 import random
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+
+# Ollama for AI-powered spell generation
+try:
+    import ollama
+    OLLAMA_AVAILABLE = True
+except ImportError:
+    OLLAMA_AVAILABLE = False
+    print("Warning: ollama package not found. Spell generation will use template-based fallback.")
 
 from damage_lab import DamageLabTab
 
@@ -681,9 +690,9 @@ def generate_spell_description(name: str, element: str, archetype: str, stats: d
 
 
 def generate_spell_options(prompt_data: dict, category: str, tier: str,
-                          mana_density: int, char_stats: dict) -> list:
+                          mana_density: int, char_stats: dict, original_prompt: str = "") -> list:
     """
-    Generate 5 varied spell options.
+    Generate 5 varied spell options using Ollama AI (with template fallback).
 
     Args:
         prompt_data: from parse_research_prompt()
@@ -691,10 +700,21 @@ def generate_spell_options(prompt_data: dict, category: str, tier: str,
         tier: "T1", "T2", etc.
         mana_density: character's mana density value
         char_stats: character's stats dict (for future enhancements)
+        original_prompt: the original user prompt for Ollama
 
     Returns:
         List of 5 spell dicts ready to pass to ensure_ability_obj()
     """
+    # Try Ollama first if available
+    if OLLAMA_AVAILABLE and original_prompt:
+        try:
+            return generate_spell_options_with_ollama(
+                original_prompt, prompt_data, category, tier, mana_density, char_stats
+            )
+        except Exception as e:
+            print(f"Ollama generation failed, using template fallback: {e}")
+
+    # Template-based fallback
     elements = prompt_data["elements"]
     archetypes = prompt_data["archetypes"]
 
@@ -740,6 +760,590 @@ def generate_spell_options(prompt_data: dict, category: str, tier: str,
         spells.append(spell)
 
     return spells
+
+
+def generate_spell_options_with_ollama(prompt: str, prompt_data: dict, category: str,
+                                       tier: str, mana_density: int, char_stats: dict) -> list:
+    """
+    Generate 5 spell options using Ollama LLM (gemma3:1b).
+
+    Returns list of spell dicts or raises exception if Ollama fails.
+    """
+    # Get category modifiers for context
+    cat_mods = ABILITY_MODS.get(category, ABILITY_MODS["inner"])
+    tier_info = TIER_DICE.get(tier, DEFAULT_TIER_DICE)
+
+    # Build detailed prompt for the LLM
+    system_prompt = f"""You are a creative fantasy spell designer for a tabletop RPG. Generate exactly 5 unique magical spells based on the user's research description.
+
+CONSTRAINTS:
+- Tier: {tier} (dice range: {tier_info['min']}-{tier_info['max']}, count: {tier_info['count_range'][0]}-{tier_info['count_range'][1]})
+- Category: {category} (damage mod: {cat_mods['damage']}x, mana mod: {cat_mods['mana']}x)
+- Elements detected: {', '.join(prompt_data['elements'])}
+- Spell types detected: {', '.join(prompt_data['archetypes'])}
+
+REQUIREMENTS:
+1. Each spell must have a creative, unique name (not generic)
+2. Damage format: MUST be dice notation like "2d6", "1d8+2", "3d4-1" - REQUIRED for all spells
+3. Mana cost: MUST be a number between 1-50 - REQUIRED
+4. Roll type: MUST be exactly one of: "Attack", "Save", "Check", or "None"
+5. Description: 2-3 sentences with vivid flavor - REQUIRED
+6. Vary the spells - different power levels, effects, and styles
+
+CRITICAL: You MUST return ONLY valid JSON. No text before or after. Just the JSON array.
+
+OUTPUT FORMAT (MUST be exactly this structure):
+[
+  {{
+    "name": "Arcane Missile",
+    "roll_type": "Attack",
+    "damage": "2d6+1",
+    "mana_cost": 8,
+    "notes": "Launch magical projectiles at your target.",
+    "overcast_enabled": false
+  }},
+  {{
+    "name": "Flame Strike",
+    "roll_type": "Attack",
+    "damage": "3d8",
+    "mana_cost": 12,
+    "notes": "Summon a pillar of fire to immolate your foes.",
+    "overcast_enabled": true
+  }}
+]
+
+User Research: {prompt}
+
+Remember: Return ONLY the JSON array. All fields are required."""
+
+    try:
+        # Call Ollama
+        response = ollama.generate(
+            model='gemma3:1b',
+            prompt=system_prompt,
+            format='json',
+            options={
+                'temperature': 0.7,  # Moderate creativity for better structure
+                'top_p': 0.9,
+            }
+        )
+
+        # Parse response
+        response_text = response.get('response', '')
+
+        if not response_text or response_text.strip() == '':
+            raise Exception("Ollama returned empty response")
+
+        # Try to extract JSON if there's extra text
+        json_start = response_text.find('[')
+        json_end = response_text.rfind(']') + 1
+
+        if json_start >= 0 and json_end > json_start:
+            json_text = response_text[json_start:json_end]
+        else:
+            json_text = response_text
+
+        # Parse JSON
+        try:
+            spells_data = json.loads(json_text)
+        except json.JSONDecodeError as je:
+            raise Exception(f"Failed to parse JSON response: {je}. Response was: {json_text[:200]}")
+
+        if not isinstance(spells_data, list):
+            raise Exception(f"Expected JSON array, got {type(spells_data)}")
+
+        # Convert to proper spell format
+        spells = []
+        for i, spell_data in enumerate(spells_data[:5]):  # Ensure max 5
+            if not isinstance(spell_data, dict):
+                print(f"Warning: Spell {i} is not a dict, skipping")
+                continue
+
+            # Validate required fields
+            if 'name' not in spell_data:
+                spell_data['name'] = f"Unnamed Spell {i+1}"
+            if 'damage' not in spell_data or not spell_data['damage']:
+                spell_data['damage'] = "1d6"
+            if 'mana_cost' not in spell_data:
+                spell_data['mana_cost'] = 5
+            if 'roll_type' not in spell_data:
+                spell_data['roll_type'] = "Attack"
+            if 'notes' not in spell_data:
+                spell_data['notes'] = "A magical spell."
+
+            # Build overcast dict from enabled flag
+            overcast_enabled = spell_data.get("overcast_enabled", False)
+            overcast = {
+                "enabled": overcast_enabled,
+                "scale": 3 if overcast_enabled else 0,
+                "power": 0.85,
+                "cap": 999
+            }
+
+            # Convert mana_cost to int safely
+            try:
+                mana_cost = int(spell_data['mana_cost'])
+            except (ValueError, TypeError):
+                mana_cost = 5
+
+            spell = {
+                "name": str(spell_data['name']),
+                "favorite": False,
+                "roll_type": str(spell_data['roll_type']),
+                "damage": str(spell_data['damage']),
+                "mana_cost": mana_cost,
+                "notes": str(spell_data['notes']),
+                "overcast": overcast,
+            }
+            spells.append(spell)
+
+        # Pad to 5 if needed
+        while len(spells) < 5:
+            spells.append({
+                "name": f"Arcane Spell {len(spells) + 1}",
+                "favorite": False,
+                "roll_type": "Attack",
+                "damage": "1d6",
+                "mana_cost": 5,
+                "notes": "A basic magical spell.",
+                "overcast": {"enabled": False, "scale": 0, "power": 0.85, "cap": 999},
+            })
+
+        return spells[:5]
+
+    except Exception as e:
+        # Re-raise to trigger fallback with detailed error
+        error_msg = f"Ollama generation failed: {str(e)}"
+        print(error_msg)  # Print to console for debugging
+        raise Exception(error_msg)
+
+
+# ---------------- Spell Library Functions ----------------
+
+LIBRARY_PATH = Path("spell_library.json")
+
+
+def load_spell_library() -> dict:
+    """
+    Load spell library from spell_library.json.
+    Returns {"spells": [...]} structure.
+    """
+    if not LIBRARY_PATH.exists():
+        return {"spells": []}
+
+    try:
+        with open(LIBRARY_PATH, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            if isinstance(data, dict) and "spells" in data:
+                return data
+            return {"spells": []}
+    except Exception:
+        return {"spells": []}
+
+
+def save_spell_library(library: dict) -> None:
+    """
+    Save spell library to spell_library.json.
+    """
+    try:
+        with open(LIBRARY_PATH, 'w', encoding='utf-8') as f:
+            json.dump(library, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def add_spell_to_library(spell: dict, metadata: dict) -> str:
+    """
+    Add spell to library with metadata.
+    Returns unique spell ID.
+    """
+    library = load_spell_library()
+
+    # Generate unique ID
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    random_suffix = ''.join(random.choices('0123456789abcdef', k=6))
+    spell_id = f"{timestamp}_{random_suffix}"
+
+    entry = {
+        "id": spell_id,
+        "spell": spell.copy(),
+        "metadata": metadata.copy()
+    }
+
+    library["spells"].append(entry)
+    save_spell_library(library)
+
+    return spell_id
+
+
+def get_library_spells(filters: dict = None) -> list:
+    """
+    Get spells from library, optionally filtered.
+    """
+    library = load_spell_library()
+    spells = library.get("spells", [])
+
+    if not filters:
+        return spells
+
+    filtered = []
+    for entry in spells:
+        metadata = entry.get("metadata", {})
+        match = True
+
+        for key, value in filters.items():
+            if metadata.get(key) != value:
+                match = False
+                break
+
+        if match:
+            filtered.append(entry)
+
+    return filtered
+
+
+def remove_from_library(spell_id: str) -> bool:
+    """
+    Remove spell from library by ID.
+    Returns True if removed, False if not found.
+    """
+    library = load_spell_library()
+    spells = library.get("spells", [])
+
+    for i, entry in enumerate(spells):
+        if entry.get("id") == spell_id:
+            spells.pop(i)
+            library["spells"] = spells
+            save_spell_library(library)
+            return True
+
+    return False
+
+
+def import_spell_from_library(spell_id: str) -> dict:
+    """
+    Get spell dict from library by ID (without metadata).
+    Returns None if not found.
+    """
+    library = load_spell_library()
+
+    for entry in library.get("spells", []):
+        if entry.get("id") == spell_id:
+            return entry.get("spell", {}).copy()
+
+    return None
+
+
+# ---------------- Spell Upgrade Functions ----------------
+
+def parse_damage_expr(expr: str) -> tuple:
+    """
+    Parse dice expression like "2d6+3" into (count, size, bonus).
+    Returns (0, 0, 0) if invalid.
+    """
+    expr = expr.strip()
+    if not expr:
+        return (0, 0, 0)
+
+    # Pattern: XdY or XdY+Z or XdY-Z
+    match = re.match(r'(\d+)d(\d+)([+-]\d+)?', expr)
+    if not match:
+        return (0, 0, 0)
+
+    count = int(match.group(1))
+    size = int(match.group(2))
+    bonus = int(match.group(3)) if match.group(3) else 0
+
+    return (count, size, bonus)
+
+
+def build_damage_expr(count: int, size: int, bonus: int) -> str:
+    """
+    Build dice expression from components.
+    """
+    expr = f"{count}d{size}"
+    if bonus > 0:
+        expr += f"+{bonus}"
+    elif bonus < 0:
+        expr += str(bonus)
+    return expr
+
+
+def generate_spell_upgrades_with_ollama(base_spell: dict, category: str, tier: str) -> list:
+    """
+    Generate 5 spell upgrade options using Ollama LLM (gemma3:1b).
+
+    Returns list of 5 upgraded spell dicts or raises exception if Ollama fails.
+    """
+    # Extract current spell details
+    name = base_spell.get("name", "Unknown Spell")
+    damage = base_spell.get("damage", "")
+    mana_cost = base_spell.get("mana_cost", 1)
+    roll_type = base_spell.get("roll_type", "None")
+    notes = base_spell.get("notes", "")
+    overcast = base_spell.get("overcast", {})
+
+    # Build detailed prompt for the LLM
+    system_prompt = f"""You are a creative fantasy spell designer for a tabletop RPG. Generate exactly 5 upgrade options for the following existing spell.
+
+CURRENT SPELL:
+- Name: {name}
+- Damage: {damage}
+- Mana Cost: {mana_cost}
+- Roll Type: {roll_type}
+- Description: {notes}
+- Overcast: {"Enabled" if overcast.get("enabled") else "Disabled"}
+
+UPGRADE REQUIREMENTS:
+1. Generate 5 distinct upgrade paths with different strategies:
+   - Enhanced: Increase damage (bigger/more dice)
+   - Efficient: Reduce mana cost by 15-25%
+   - Empowered: Enable or improve overcast scaling
+   - Improved: Balanced upgrade (small damage boost + mana reduction)
+   - Superior: Major damage increase with slight mana cost increase
+
+2. Each upgrade MUST have ALL these fields:
+   - name: Add prefix like "Enhanced", "Efficient", "Empowered", "Improved", or "Superior" to base name
+   - roll_type: MUST be exactly "{roll_type}" (keep same as original)
+   - damage: MUST be dice notation like "2d6", "3d8+2", "1d10" - REQUIRED
+   - mana_cost: MUST be a number between 1-50 - REQUIRED
+   - notes: Original description with note about what improved - REQUIRED
+   - overcast_enabled: true or false
+
+3. Damage format rules: Must be "XdY" or "XdY+Z" or "XdY-Z" format
+
+CRITICAL: You MUST return ONLY valid JSON. No text before or after. Just the JSON array.
+
+OUTPUT FORMAT (MUST be exactly this structure):
+[
+  {{
+    "name": "Enhanced {name}",
+    "roll_type": "{roll_type}",
+    "damage": "3d8",
+    "mana_cost": {int(mana_cost * 1.0)},
+    "notes": "{notes[:50]}... [Upgraded: Increased damage]",
+    "overcast_enabled": false
+  }}
+]
+
+Remember: Return ONLY the JSON array. All fields are required. Generate 5 upgrades total."""
+
+    try:
+        # Call Ollama
+        response = ollama.generate(
+            model='gemma3:1b',
+            prompt=system_prompt,
+            format='json',
+            options={
+                'temperature': 0.7,  # Moderate creativity for better structure
+                'top_p': 0.9,
+            }
+        )
+
+        # Parse response
+        response_text = response.get('response', '')
+
+        if not response_text or response_text.strip() == '':
+            raise Exception("Ollama returned empty response")
+
+        # Try to extract JSON if there's extra text
+        json_start = response_text.find('[')
+        json_end = response_text.rfind(']') + 1
+
+        if json_start >= 0 and json_end > json_start:
+            json_text = response_text[json_start:json_end]
+        else:
+            json_text = response_text
+
+        # Parse JSON
+        try:
+            upgrades_data = json.loads(json_text)
+        except json.JSONDecodeError as je:
+            raise Exception(f"Failed to parse JSON: {je}. Response: {json_text[:200]}")
+
+        if not isinstance(upgrades_data, list):
+            raise Exception(f"Expected JSON array, got {type(upgrades_data)}")
+
+        # Convert to proper spell format
+        upgrades = []
+        for i, upgrade_data in enumerate(upgrades_data[:5]):  # Ensure max 5
+            if not isinstance(upgrade_data, dict):
+                print(f"Warning: Upgrade {i} is not a dict, skipping")
+                continue
+
+            # Validate required fields
+            if 'name' not in upgrade_data:
+                upgrade_data['name'] = f"Upgraded {name} {i+1}"
+            if 'damage' not in upgrade_data or not upgrade_data['damage']:
+                upgrade_data['damage'] = damage if damage else "1d6"
+            if 'mana_cost' not in upgrade_data:
+                upgrade_data['mana_cost'] = mana_cost
+            if 'roll_type' not in upgrade_data:
+                upgrade_data['roll_type'] = roll_type
+            if 'notes' not in upgrade_data:
+                upgrade_data['notes'] = notes
+
+            # Build overcast dict
+            overcast_enabled = upgrade_data.get("overcast_enabled", False)
+            new_overcast = overcast.copy() if isinstance(overcast, dict) else {}
+            if overcast_enabled and not new_overcast.get("enabled"):
+                # Enable overcast
+                new_overcast["enabled"] = True
+                new_overcast["scale"] = 3
+                new_overcast["power"] = 0.85
+                new_overcast["cap"] = 999
+            elif overcast_enabled and new_overcast.get("enabled"):
+                # Enhance existing overcast
+                new_overcast["scale"] = new_overcast.get("scale", 3) + 1
+
+            # Convert mana_cost to int safely
+            try:
+                upgrade_mana = int(upgrade_data['mana_cost'])
+            except (ValueError, TypeError):
+                upgrade_mana = mana_cost
+
+            upgrade = {
+                "name": str(upgrade_data['name']),
+                "favorite": False,
+                "roll_type": str(upgrade_data['roll_type']),
+                "damage": str(upgrade_data['damage']),
+                "mana_cost": upgrade_mana,
+                "notes": str(upgrade_data['notes']),
+                "overcast": new_overcast,
+            }
+            upgrades.append(upgrade)
+
+        # Pad to 5 if needed
+        while len(upgrades) < 5:
+            upgrades.append({
+                "name": f"Improved {name} {len(upgrades) + 1}",
+                "favorite": False,
+                "roll_type": roll_type,
+                "damage": damage if damage else "1d6",
+                "mana_cost": max(1, int(mana_cost * 0.9)),
+                "notes": notes + " [Minor upgrade]",
+                "overcast": overcast.copy() if isinstance(overcast, dict) else {},
+            })
+
+        return upgrades[:5]
+
+    except Exception as e:
+        # Re-raise to trigger fallback with detailed error
+        error_msg = f"Ollama upgrade generation failed: {str(e)}"
+        print(error_msg)  # Print to console for debugging
+        raise Exception(error_msg)
+
+
+def generate_spell_upgrades(base_spell: dict, category: str, tier: str) -> list:
+    """
+    Generate 5 upgrade options for a spell using Ollama AI (with template fallback).
+
+    Returns list of 5 upgraded spell dicts.
+    """
+    # Try Ollama first if available
+    if OLLAMA_AVAILABLE:
+        try:
+            return generate_spell_upgrades_with_ollama(base_spell, category, tier)
+        except Exception as e:
+            print(f"Ollama upgrade generation failed, using template fallback: {e}")
+
+    # Template-based fallback
+    upgrades = []
+
+    # Parse current spell stats
+    name = base_spell.get("name", "Unknown Spell")
+    damage = base_spell.get("damage", "")
+    mana_cost = base_spell.get("mana_cost", 1)
+    roll_type = base_spell.get("roll_type", "None")
+    notes = base_spell.get("notes", "")
+    overcast = base_spell.get("overcast", {}).copy()
+
+    count, size, bonus = parse_damage_expr(damage)
+
+    # Upgrade 1: Damage Boost - Increase dice count or size
+    up1 = base_spell.copy()
+    up1["name"] = f"Enhanced {name}"
+    if count > 0 and size > 0:
+        # Increase dice count by 1, or upgrade dice size
+        if random.random() < 0.5 and count < 5:
+            new_count = count + 1
+            new_size = size
+        else:
+            new_count = count
+            # Upgrade dice size: d4->d6, d6->d8, d8->d10, d10->d12, d12->d20
+            size_progression = {4: 6, 6: 8, 8: 10, 10: 12, 12: 20, 20: 20}
+            new_size = size_progression.get(size, size)
+        up1["damage"] = build_damage_expr(new_count, new_size, bonus)
+    up1["notes"] = notes + " [Upgraded: Increased damage]"
+    up1["overcast"] = overcast.copy()
+    upgrades.append(up1)
+
+    # Upgrade 2: Efficiency - Reduce mana cost
+    up2 = base_spell.copy()
+    up2["name"] = f"Efficient {name}"
+    reduction = random.uniform(0.15, 0.25)
+    up2["mana_cost"] = max(1, int(mana_cost * (1 - reduction)))
+    up2["damage"] = damage
+    up2["notes"] = notes + " [Upgraded: Reduced mana cost]"
+    up2["overcast"] = overcast.copy()
+    upgrades.append(up2)
+
+    # Upgrade 3: Overcast Enhancement
+    up3 = base_spell.copy()
+    up3["name"] = f"Empowered {name}"
+    up3["damage"] = damage
+    up3["mana_cost"] = mana_cost
+    up3_overcast = overcast.copy()
+    if not up3_overcast.get("enabled", False):
+        # Enable overcast
+        up3_overcast["enabled"] = True
+        up3_overcast["scale"] = random.randint(2, 4)
+        up3_overcast["power"] = 0.85
+        up3_overcast["cap"] = 999
+        up3["notes"] = notes + " [Upgraded: Overcast enabled]"
+    else:
+        # Enhance existing overcast
+        up3_overcast["scale"] = up3_overcast.get("scale", 0) + random.randint(1, 2)
+        up3["notes"] = notes + " [Upgraded: Enhanced overcast scaling]"
+    up3["overcast"] = up3_overcast
+    upgrades.append(up3)
+
+    # Upgrade 4: Balanced - Small improvements to both
+    up4 = base_spell.copy()
+    up4["name"] = f"Improved {name}"
+    if count > 0 and size > 0:
+        # Small damage increase (add +1 to bonus or increase count slightly)
+        new_bonus = bonus + 1
+        up4["damage"] = build_damage_expr(count, size, new_bonus)
+    else:
+        up4["damage"] = damage
+    up4["mana_cost"] = max(1, int(mana_cost * 0.9))
+    up4["notes"] = notes + " [Upgraded: Balanced improvements]"
+    up4["overcast"] = overcast.copy()
+    upgrades.append(up4)
+
+    # Upgrade 5: Power Spike - Big damage, slight mana increase
+    up5 = base_spell.copy()
+    up5["name"] = f"Superior {name}"
+    if count > 0 and size > 0:
+        # Increase both dice count and size or add significant bonus
+        if count < 4:
+            new_count = count + 1
+            new_bonus = bonus + 2
+        else:
+            new_count = count
+            new_bonus = bonus + 3
+        size_progression = {4: 6, 6: 8, 8: 10, 10: 12, 12: 20, 20: 20}
+        new_size = size_progression.get(size, size)
+        up5["damage"] = build_damage_expr(new_count, new_size, new_bonus)
+    else:
+        up5["damage"] = damage
+    up5["mana_cost"] = int(mana_cost * 1.1)
+    up5["notes"] = notes + " [Upgraded: Major power increase]"
+    up5["overcast"] = overcast.copy()
+    upgrades.append(up5)
+
+    return upgrades
 
 
 # ---------------- App ----------------
@@ -871,6 +1475,7 @@ class CharacterApp(tk.Tk):
         self.tab_notes = ttk.Frame(self.tabs)
         self.tab_world = ttk.Frame(self.tabs)
         self.tab_damage_lab = ttk.Frame(self.tabs)
+        self.tab_spell_library = ttk.Frame(self.tabs)
 
         self.tabs.add(self.tab_overview, text="Overview")
         self.tabs.add(self.tab_inventory, text="Inventory")
@@ -878,6 +1483,7 @@ class CharacterApp(tk.Tk):
         self.tabs.add(self.tab_notes, text="Notes")
         self.tabs.add(self.tab_world, text="World Info")
         self.tabs.add(self.tab_damage_lab, text="Damage Lab")
+        self.tabs.add(self.tab_spell_library, text="Spell Library (DM)")
 
         self._build_overview_tab()
         self._build_inventory_tab()
@@ -885,6 +1491,7 @@ class CharacterApp(tk.Tk):
         self._build_notes_tab()
         self._build_world_tab()
         self._build_damage_lab_tab()
+        self._build_spell_library_tab()
 
     def _build_overview_tab(self):
         left = ttk.Frame(self.tab_overview)
@@ -1488,6 +2095,10 @@ class CharacterApp(tk.Tk):
             row=9, column=1, sticky="w", padx=6, pady=(6, 8)
         )
 
+        ttk.Button(details, text="Upgrade Spell", command=lambda k=key: self.spell_upgrade_dialog(k)).grid(
+            row=10, column=1, sticky="w", padx=6, pady=(0, 8)
+        )
+
         move_box = ttk.LabelFrame(details, text="Transfer")
         move_box.grid(row=11, column=1, sticky="ew", padx=6, pady=(6, 8))
 
@@ -1832,10 +2443,10 @@ class CharacterApp(tk.Tk):
 
             char_stats = {k: int(self.var_stats[k].get() or "0") for k in STAT_KEYS}
 
-            # Generate spells
+            # Generate spells (with Ollama if available)
             nonlocal generated_spells
             generated_spells = generate_spell_options(
-                prompt_data, key, tier, mana_density, char_stats
+                prompt_data, key, tier, mana_density, char_stats, original_prompt=prompt
             )
 
             # Populate listbox
@@ -1904,6 +2515,50 @@ class CharacterApp(tk.Tk):
 
             status.set(f"Added '{spell['name']}' to {key} abilities.")
 
+        def on_save_to_library():
+            if not generated_spells:
+                status.set("Generate spells first.")
+                return
+
+            sel = list(options_list.curselection())
+            if len(sel) != 1:
+                status.set("Select a spell to save.")
+                return
+
+            idx = sel[0]
+            spell = generated_spells[idx].copy()
+
+            # Update from edit fields
+            spell["name"] = name_var.get().strip()
+            spell["roll_type"] = roll_type_var.get()
+            spell["damage"] = damage_var.get().strip()
+            try:
+                spell["mana_cost"] = int(mana_var.get() or "0")
+            except ValueError:
+                spell["mana_cost"] = 0
+
+            spell["overcast"]["enabled"] = bool(overcast_enabled_var.get())
+            try:
+                spell["overcast"]["scale"] = int(overcast_scale_var.get() or "0")
+            except ValueError:
+                spell["overcast"]["scale"] = 0
+
+            spell["notes"] = notes_box.get("1.0", tk.END).rstrip("\n")
+
+            # Create metadata
+            metadata = {
+                "date_created": datetime.now().isoformat(),
+                "source_character": self.var_name.get() or "Unknown",
+                "element": "unknown",  # Could parse from spell name/notes
+                "archetype": "unknown",  # Could parse from spell type
+                "tier": self.var_tier.get() or "T1",
+                "category": key
+            }
+
+            # Save to library
+            spell_id = add_spell_to_library(spell, metadata)
+            status.set(f"Saved '{spell['name']}' to library.")
+
         # Bind selection
         options_list.bind("<<ListboxSelect>>", on_select)
 
@@ -1915,6 +2570,205 @@ class CharacterApp(tk.Tk):
         bottom_btns.pack(fill=tk.X, padx=10, pady=(0, 10))
 
         ttk.Button(bottom_btns, text="Add to Character", command=on_add).pack(side=tk.LEFT)
+        ttk.Button(bottom_btns, text="Save to Library", command=on_save_to_library).pack(side=tk.LEFT, padx=8)
+        ttk.Button(bottom_btns, text="Close", command=win.destroy).pack(side=tk.RIGHT)
+
+    def spell_upgrade_dialog(self, key: str):
+        """
+        Open dialog for upgrading an existing spell.
+
+        Args:
+            key: ability category ("core", "inner", or "outer")
+        """
+        # Get selected spell
+        ab = self.ability_selected_ref.get(key)
+        if ab is None:
+            messagebox.showinfo("Upgrade Spell", "Select a spell first.")
+            return
+
+        win = tk.Toplevel(self)
+        win.title(f"Upgrade Spell: {ab.get('name', 'Unknown')}")
+        win.geometry("700x680")
+        win.transient(self)
+        win.grab_set()
+
+        # Status message
+        status = tk.StringVar(value="")
+
+        # Current spell info
+        current_frame = ttk.LabelFrame(win, text="Current Spell")
+        current_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+
+        current_info = f"Name: {ab.get('name', '')}  |  Damage: {ab.get('damage', 'None')}  |  Mana: {ab.get('mana_cost', 0)}"
+        ttk.Label(current_frame, text=current_info, font=("TkDefaultFont", 9)).pack(padx=8, pady=8)
+
+        # Generation button
+        gen_btn_frame = ttk.Frame(win)
+        gen_btn_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        # Save original checkbox
+        save_original_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(gen_btn_frame, text="Save original to library first", variable=save_original_var).pack(side=tk.LEFT)
+
+        # Options listbox
+        options_frame = ttk.LabelFrame(win, text="Upgrade Options")
+        options_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        options_list = tk.Listbox(options_frame, height=5, exportselection=False)
+        options_list.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        # Store generated upgrades
+        generated_upgrades = []
+
+        # Edit frame
+        edit_frame = ttk.LabelFrame(win, text="Edit Selected Upgrade")
+        edit_frame.pack(fill=tk.BOTH, padx=10, pady=5)
+
+        # Edit fields
+        name_var = tk.StringVar()
+        roll_type_var = tk.StringVar(value="None")
+        damage_var = tk.StringVar()
+        mana_var = tk.StringVar(value="0")
+        overcast_enabled_var = tk.BooleanVar(value=False)
+        overcast_scale_var = tk.StringVar(value="0")
+
+        ttk.Label(edit_frame, text="Name:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(edit_frame, textvariable=name_var, width=40).grid(row=0, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(edit_frame, text="Roll Type:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        ttk.Combobox(edit_frame, values=ROLL_TYPES, textvariable=roll_type_var, state="readonly", width=15).grid(
+            row=1, column=1, sticky="w", padx=6, pady=4
+        )
+
+        ttk.Label(edit_frame, text="Damage:").grid(row=2, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(edit_frame, textvariable=damage_var, width=20).grid(row=2, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(edit_frame, text="Mana Cost:").grid(row=3, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(edit_frame, textvariable=mana_var, width=10).grid(row=3, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Checkbutton(edit_frame, text="Enable Overcast", variable=overcast_enabled_var).grid(
+            row=4, column=0, columnspan=2, sticky="w", padx=6, pady=4
+        )
+
+        ttk.Label(edit_frame, text="Overcast Scale:").grid(row=5, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(edit_frame, textvariable=overcast_scale_var, width=10).grid(row=5, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(edit_frame, text="Description:").grid(row=6, column=0, sticky="nw", padx=6, pady=4)
+        notes_box = tk.Text(edit_frame, wrap="word", height=4)
+        notes_box.grid(row=6, column=1, sticky="nsew", padx=6, pady=4)
+
+        edit_frame.grid_rowconfigure(6, weight=1)
+        edit_frame.grid_columnconfigure(1, weight=1)
+
+        # Functions
+        def on_generate():
+            # Get character context
+            tier = self.var_tier.get() or "T1"
+
+            # Generate upgrades
+            nonlocal generated_upgrades
+            generated_upgrades = generate_spell_upgrades(ab, key, tier)
+
+            # Populate listbox
+            options_list.delete(0, tk.END)
+            for upgrade in generated_upgrades:
+                display = f"{upgrade['name']} (Dmg: {upgrade.get('damage', 'None')}, Mana: {upgrade['mana_cost']})"
+                options_list.insert(tk.END, display)
+
+            status.set(f"Generated {len(generated_upgrades)} upgrade options.")
+
+        def on_select(event):
+            sel = list(options_list.curselection())
+            if len(sel) != 1:
+                return
+
+            idx = sel[0]
+            if 0 <= idx < len(generated_upgrades):
+                upgrade = generated_upgrades[idx]
+
+                # Populate edit fields
+                name_var.set(upgrade["name"])
+                roll_type_var.set(upgrade["roll_type"])
+                damage_var.set(upgrade["damage"])
+                mana_var.set(str(upgrade["mana_cost"]))
+
+                overcast = upgrade.get("overcast", {})
+                overcast_enabled_var.set(bool(overcast.get("enabled", False)))
+                overcast_scale_var.set(str(overcast.get("scale", 0)))
+
+                notes_box.delete("1.0", tk.END)
+                notes_box.insert("1.0", upgrade.get("notes", ""))
+
+        def on_replace():
+            if not generated_upgrades:
+                status.set("Generate upgrades first.")
+                return
+
+            sel = list(options_list.curselection())
+            if len(sel) != 1:
+                status.set("Select an upgrade to apply.")
+                return
+
+            idx = sel[0]
+            upgrade = generated_upgrades[idx].copy()
+
+            # Update from edit fields
+            upgrade["name"] = name_var.get().strip()
+            upgrade["roll_type"] = roll_type_var.get()
+            upgrade["damage"] = damage_var.get().strip()
+            try:
+                upgrade["mana_cost"] = int(mana_var.get() or "0")
+            except ValueError:
+                upgrade["mana_cost"] = 0
+
+            upgrade["overcast"]["enabled"] = bool(overcast_enabled_var.get())
+            try:
+                upgrade["overcast"]["scale"] = int(overcast_scale_var.get() or "0")
+            except ValueError:
+                upgrade["overcast"]["scale"] = 0
+
+            upgrade["notes"] = notes_box.get("1.0", tk.END).rstrip("\n")
+
+            # Save original to library if checked
+            if save_original_var.get():
+                metadata = {
+                    "date_created": datetime.now().isoformat(),
+                    "source_character": self.var_name.get() or "Unknown",
+                    "element": "unknown",
+                    "archetype": "unknown",
+                    "tier": self.var_tier.get() or "T1",
+                    "category": key
+                }
+                add_spell_to_library(ab.copy(), metadata)
+
+            # Replace original spell with upgrade
+            # Find the spell in abilities_data and replace it
+            try:
+                idx_in_list = self.abilities_data[key].index(ab)
+                self.abilities_data[key][idx_in_list] = ensure_ability_obj(upgrade)
+                self.ability_selected_ref[key] = self.abilities_data[key][idx_in_list]
+            except ValueError:
+                # If not found, just append
+                self.abilities_data[key].append(ensure_ability_obj(upgrade))
+                self.ability_selected_ref[key] = self.abilities_data[key][-1]
+
+            self.ability_render(key)
+            self.ability_on_select(key)  # Refresh the details panel
+
+            status.set(f"Upgraded spell to '{upgrade['name']}'.")
+            win.destroy()
+
+        # Bind selection
+        options_list.bind("<<ListboxSelect>>", on_select)
+
+        # Buttons
+        ttk.Button(gen_btn_frame, text="Generate Upgrades", command=on_generate).pack(side=tk.LEFT, padx=4)
+        ttk.Label(gen_btn_frame, textvariable=status, foreground="gray").pack(side=tk.LEFT, padx=10)
+
+        bottom_btns = ttk.Frame(win)
+        bottom_btns.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+        ttk.Button(bottom_btns, text="Replace Original", command=on_replace).pack(side=tk.LEFT)
         ttk.Button(bottom_btns, text="Close", command=win.destroy).pack(side=tk.RIGHT)
 
 
@@ -1961,6 +2815,214 @@ class CharacterApp(tk.Tk):
             return int(self.var_mana_density.get().strip() or "0")
         except ValueError:
             return 0
+
+    def _build_spell_library_tab(self):
+        """Build the Spell Library tab (DM tool)."""
+        frame = ttk.Frame(self.tab_spell_library)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Left panel: Spell list
+        left = ttk.Frame(frame)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+
+        ttk.Label(left, text="Spell Library", font=("TkDefaultFont", 12, "bold")).pack(anchor="w", pady=(0, 5))
+
+        self.library_listbox = tk.Listbox(left, height=20, exportselection=False)
+        self.library_listbox.pack(fill=tk.BOTH, expand=True)
+        self.library_listbox.bind("<<ListboxSelect>>", lambda _: self.library_on_select())
+
+        # Buttons below list
+        btn_frame = ttk.Frame(left)
+        btn_frame.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(btn_frame, text="Refresh", command=self.library_render).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(btn_frame, text="Delete Selected", command=self.library_delete_spell).pack(side=tk.LEFT)
+
+        # Right panel: Spell details
+        right = ttk.Frame(frame)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        details = ttk.LabelFrame(right, text="Spell Details")
+        details.pack(fill=tk.BOTH, expand=True)
+
+        # Spell name
+        ttk.Label(details, text="Name:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        self.library_spell_name = tk.StringVar()
+        ttk.Entry(details, textvariable=self.library_spell_name, state="readonly", width=40).grid(row=0, column=1, sticky="w", padx=6, pady=4)
+
+        # Roll type
+        ttk.Label(details, text="Roll Type:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        self.library_spell_roll_type = tk.StringVar()
+        ttk.Entry(details, textvariable=self.library_spell_roll_type, state="readonly", width=15).grid(row=1, column=1, sticky="w", padx=6, pady=4)
+
+        # Damage
+        ttk.Label(details, text="Damage:").grid(row=2, column=0, sticky="w", padx=6, pady=4)
+        self.library_spell_damage = tk.StringVar()
+        ttk.Entry(details, textvariable=self.library_spell_damage, state="readonly", width=20).grid(row=2, column=1, sticky="w", padx=6, pady=4)
+
+        # Mana cost
+        ttk.Label(details, text="Mana Cost:").grid(row=3, column=0, sticky="w", padx=6, pady=4)
+        self.library_spell_mana = tk.StringVar()
+        ttk.Entry(details, textvariable=self.library_spell_mana, state="readonly", width=10).grid(row=3, column=1, sticky="w", padx=6, pady=4)
+
+        # Overcast
+        ttk.Label(details, text="Overcast:").grid(row=4, column=0, sticky="w", padx=6, pady=4)
+        self.library_spell_overcast = tk.StringVar()
+        ttk.Entry(details, textvariable=self.library_spell_overcast, state="readonly", width=20).grid(row=4, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Separator(details, orient="horizontal").grid(row=5, column=0, columnspan=2, sticky="ew", padx=6, pady=8)
+
+        # Metadata
+        ttk.Label(details, text="Source Character:").grid(row=6, column=0, sticky="w", padx=6, pady=4)
+        self.library_spell_source = tk.StringVar()
+        ttk.Entry(details, textvariable=self.library_spell_source, state="readonly", width=30).grid(row=6, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(details, text="Element/Archetype:").grid(row=7, column=0, sticky="w", padx=6, pady=4)
+        self.library_spell_meta = tk.StringVar()
+        ttk.Entry(details, textvariable=self.library_spell_meta, state="readonly", width=30).grid(row=7, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(details, text="Tier/Category:").grid(row=8, column=0, sticky="w", padx=6, pady=4)
+        self.library_spell_tier_cat = tk.StringVar()
+        ttk.Entry(details, textvariable=self.library_spell_tier_cat, state="readonly", width=20).grid(row=8, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(details, text="Description:").grid(row=9, column=0, sticky="nw", padx=6, pady=4)
+        self.library_spell_notes = tk.Text(details, wrap="word", height=6, state="disabled")
+        self.library_spell_notes.grid(row=9, column=1, sticky="nsew", padx=6, pady=4)
+
+        # Import button
+        ttk.Button(details, text="Import to Character", command=self.library_import_spell).grid(row=10, column=1, sticky="w", padx=6, pady=(8, 8))
+
+        details.grid_rowconfigure(9, weight=1)
+        details.grid_columnconfigure(1, weight=1)
+
+        # Track selected library entry
+        self.library_selected_id = None
+
+        # Initial load
+        self.library_render()
+
+    def library_render(self):
+        """Refresh the library spell list."""
+        spells = get_library_spells()
+
+        self.library_listbox.delete(0, tk.END)
+
+        if not spells:
+            self.library_listbox.insert(tk.END, "(No spells in library)")
+            return
+
+        for entry in spells:
+            spell = entry.get("spell", {})
+            metadata = entry.get("metadata", {})
+
+            name = spell.get("name", "Unknown")
+            element = metadata.get("element", "?")
+            archetype = metadata.get("archetype", "?")
+            tier = metadata.get("tier", "?")
+            category = metadata.get("category", "?")
+
+            display = f"{name} [{element}/{archetype}] - {tier} {category}"
+            self.library_listbox.insert(tk.END, display)
+
+    def library_on_select(self):
+        """Handle library spell selection."""
+        sel = list(self.library_listbox.curselection())
+        if len(sel) != 1:
+            return
+
+        idx = sel[0]
+        spells = get_library_spells()
+
+        if idx >= len(spells):
+            return
+
+        entry = spells[idx]
+        spell = entry.get("spell", {})
+        metadata = entry.get("metadata", {})
+
+        # Store selected ID
+        self.library_selected_id = entry.get("id")
+
+        # Populate details
+        self.library_spell_name.set(spell.get("name", ""))
+        self.library_spell_roll_type.set(spell.get("roll_type", ""))
+        self.library_spell_damage.set(spell.get("damage", ""))
+        self.library_spell_mana.set(str(spell.get("mana_cost", 0)))
+
+        overcast = spell.get("overcast", {})
+        if overcast.get("enabled"):
+            overcast_str = f"Enabled (scale: {overcast.get('scale', 0)})"
+        else:
+            overcast_str = "Disabled"
+        self.library_spell_overcast.set(overcast_str)
+
+        self.library_spell_source.set(metadata.get("source_character", "Unknown"))
+        self.library_spell_meta.set(f"{metadata.get('element', '?')} / {metadata.get('archetype', '?')}")
+        self.library_spell_tier_cat.set(f"{metadata.get('tier', '?')} / {metadata.get('category', '?')}")
+
+        self.library_spell_notes.config(state="normal")
+        self.library_spell_notes.delete("1.0", tk.END)
+        self.library_spell_notes.insert("1.0", spell.get("notes", ""))
+        self.library_spell_notes.config(state="disabled")
+
+    def library_delete_spell(self):
+        """Delete selected spell from library."""
+        if not self.library_selected_id:
+            messagebox.showinfo("Delete", "Select a spell first.")
+            return
+
+        spells = get_library_spells()
+        entry = next((e for e in spells if e.get("id") == self.library_selected_id), None)
+        if not entry:
+            messagebox.showerror("Error", "Spell not found.")
+            return
+
+        spell_name = entry.get("spell", {}).get("name", "Unknown")
+
+        if messagebox.askyesno("Confirm Delete", f"Delete '{spell_name}' from library?"):
+            if remove_from_library(self.library_selected_id):
+                self.library_selected_id = None
+                self.library_render()
+                messagebox.showinfo("Deleted", f"Removed '{spell_name}' from library.")
+            else:
+                messagebox.showerror("Error", "Failed to delete spell.")
+
+    def library_import_spell(self):
+        """Import selected library spell to character."""
+        if not self.library_selected_id:
+            messagebox.showinfo("Import", "Select a spell first.")
+            return
+
+        spell = import_spell_from_library(self.library_selected_id)
+        if not spell:
+            messagebox.showerror("Error", "Spell not found.")
+            return
+
+        # Ask which category to import to
+        win = tk.Toplevel(self)
+        win.title("Import Spell")
+        win.geometry("300x150")
+        win.transient(self)
+        win.grab_set()
+
+        ttk.Label(win, text=f"Import '{spell.get('name', '')}' to:", font=("TkDefaultFont", 10)).pack(pady=15)
+
+        category_var = tk.StringVar(value="core")
+
+        ttk.Radiobutton(win, text="Core Abilities", variable=category_var, value="core").pack(anchor="w", padx=40)
+        ttk.Radiobutton(win, text="Inner Abilities", variable=category_var, value="inner").pack(anchor="w", padx=40)
+        ttk.Radiobutton(win, text="Outer Abilities", variable=category_var, value="outer").pack(anchor="w", padx=40)
+
+        def do_import():
+            category = category_var.get()
+            self.abilities_data[category].append(ensure_ability_obj(spell))
+            self.ability_render(category)
+            win.destroy()
+            messagebox.showinfo("Imported", f"Added '{spell.get('name', '')}' to {category} abilities.")
+
+        btn_frame = ttk.Frame(win)
+        btn_frame.pack(pady=15)
+        ttk.Button(btn_frame, text="Import", command=do_import).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=win.destroy).pack(side=tk.LEFT, padx=5)
 
     # ---------------- Combat Quick Use ----------------
 

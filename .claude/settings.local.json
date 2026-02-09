@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python sheet_tool.py:*)"
+      "Bash(python sheet_tool.py:*)",
+      "Bash(timeout 3 tail:*)"
     ]
   }
 }
