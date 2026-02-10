@@ -765,7 +765,7 @@ def generate_spell_options(prompt_data: dict, category: str, tier: str,
 def generate_spell_options_with_ollama(prompt: str, prompt_data: dict, category: str,
                                        tier: str, mana_density: int, char_stats: dict) -> list:
     """
-    Generate 5 spell options using Ollama LLM (gemma3:1b).
+    Generate 5 spell options using Ollama LLM (gemma3:4b).
 
     Returns list of spell dicts or raises exception if Ollama fails.
     """
@@ -773,53 +773,29 @@ def generate_spell_options_with_ollama(prompt: str, prompt_data: dict, category:
     cat_mods = ABILITY_MODS.get(category, ABILITY_MODS["inner"])
     tier_info = TIER_DICE.get(tier, DEFAULT_TIER_DICE)
 
-    # Build detailed prompt for the LLM
-    system_prompt = f"""You are a creative fantasy spell designer for a tabletop RPG. Generate exactly 5 unique magical spells based on the user's research description.
+    # Build simplified prompt for better JSON compliance
+    system_prompt = f"""Generate 5 magic spells as valid JSON. Return ONLY the JSON array, nothing else.
 
-CONSTRAINTS:
-- Tier: {tier} (dice range: {tier_info['min']}-{tier_info['max']}, count: {tier_info['count_range'][0]}-{tier_info['count_range'][1]})
-- Category: {category} (damage mod: {cat_mods['damage']}x, mana mod: {cat_mods['mana']}x)
-- Elements detected: {', '.join(prompt_data['elements'])}
-- Spell types detected: {', '.join(prompt_data['archetypes'])}
+User wants: {prompt}
+Elements: {', '.join(prompt_data['elements'])}
+Tier: {tier}
 
-REQUIREMENTS:
-1. Each spell must have a creative, unique name (not generic)
-2. Damage format: MUST be dice notation like "2d6", "1d8+2", "3d4-1" - REQUIRED for all spells
-3. Mana cost: MUST be a number between 1-50 - REQUIRED
-4. Roll type: MUST be exactly one of: "Attack", "Save", "Check", or "None"
-5. Description: 2-3 sentences with vivid flavor - REQUIRED
-6. Vary the spells - different power levels, effects, and styles
-
-CRITICAL: You MUST return ONLY valid JSON. No text before or after. Just the JSON array.
-
-OUTPUT FORMAT (MUST be exactly this structure):
+Return exactly this JSON format with 5 different spell objects:
 [
-  {{
-    "name": "Arcane Missile",
-    "roll_type": "Attack",
-    "damage": "2d6+1",
-    "mana_cost": 8,
-    "notes": "Launch magical projectiles at your target.",
-    "overcast_enabled": false
-  }},
-  {{
-    "name": "Flame Strike",
-    "roll_type": "Attack",
-    "damage": "3d8",
-    "mana_cost": 12,
-    "notes": "Summon a pillar of fire to immolate your foes.",
-    "overcast_enabled": true
-  }}
+  {{"name": "Arcane Blast", "roll_type": "Attack", "damage": "2d6", "mana_cost": 8, "notes": "Fire magical energy at target", "overcast_enabled": false}},
+  {{"name": "Mystic Shield", "roll_type": "None", "damage": "", "mana_cost": 5, "notes": "Create protective barrier", "overcast_enabled": false}},
+  {{"name": "Flame Strike", "roll_type": "Attack", "damage": "3d8+1", "mana_cost": 12, "notes": "Summon pillar of fire", "overcast_enabled": true}},
+  {{"name": "Ice Bolt", "roll_type": "Attack", "damage": "2d8", "mana_cost": 10, "notes": "Launch freezing projectile", "overcast_enabled": false}},
+  {{"name": "Shadow Curse", "roll_type": "Save", "damage": "1d10", "mana_cost": 7, "notes": "Weaken enemy with dark magic", "overcast_enabled": false}}
 ]
 
-User Research: {prompt}
-
-Remember: Return ONLY the JSON array. All fields are required."""
+CRITICAL: Output ONLY the JSON array above. No explanations. Start with [ and end with ].
+Make spell names and effects match the user's request about: {prompt}"""
 
     try:
         # Call Ollama
         response = ollama.generate(
-            model='gemma3:1b',
+            model='gemma3:4b',  # Using gemma3:4b - change to your installed model if different
             prompt=system_prompt,
             format='json',
             options={
@@ -849,53 +825,76 @@ Remember: Return ONLY the JSON array. All fields are required."""
         except json.JSONDecodeError as je:
             raise Exception(f"Failed to parse JSON response: {je}. Response was: {json_text[:200]}")
 
+        # Handle dict responses - try to extract list from common keys
+        if isinstance(spells_data, dict):
+            # Try common keys that might contain the spell list
+            for key in ['spells', 'data', 'results', 'items', 'upgrades']:
+                if key in spells_data and isinstance(spells_data[key], list):
+                    spells_data = spells_data[key]
+                    break
+            else:
+                # If still a dict and looks like a single spell, wrap it in a list
+                if 'name' in spells_data or 'damage' in spells_data:
+                    spells_data = [spells_data]
+                else:
+                    raise Exception(f"Expected JSON array or dict with spell data, got dict with keys: {list(spells_data.keys())}")
+
         if not isinstance(spells_data, list):
             raise Exception(f"Expected JSON array, got {type(spells_data)}")
 
         # Convert to proper spell format
         spells = []
         for i, spell_data in enumerate(spells_data[:5]):  # Ensure max 5
-            if not isinstance(spell_data, dict):
-                print(f"Warning: Spell {i} is not a dict, skipping")
-                continue
-
-            # Validate required fields
-            if 'name' not in spell_data:
-                spell_data['name'] = f"Unnamed Spell {i+1}"
-            if 'damage' not in spell_data or not spell_data['damage']:
-                spell_data['damage'] = "1d6"
-            if 'mana_cost' not in spell_data:
-                spell_data['mana_cost'] = 5
-            if 'roll_type' not in spell_data:
-                spell_data['roll_type'] = "Attack"
-            if 'notes' not in spell_data:
-                spell_data['notes'] = "A magical spell."
-
-            # Build overcast dict from enabled flag
-            overcast_enabled = spell_data.get("overcast_enabled", False)
-            overcast = {
-                "enabled": overcast_enabled,
-                "scale": 3 if overcast_enabled else 0,
-                "power": 0.85,
-                "cap": 999
-            }
-
-            # Convert mana_cost to int safely
             try:
-                mana_cost = int(spell_data['mana_cost'])
-            except (ValueError, TypeError):
-                mana_cost = 5
+                if not isinstance(spell_data, dict):
+                    print(f"Warning: Spell {i} is not a dict, skipping")
+                    continue
 
-            spell = {
-                "name": str(spell_data['name']),
-                "favorite": False,
-                "roll_type": str(spell_data['roll_type']),
-                "damage": str(spell_data['damage']),
-                "mana_cost": mana_cost,
-                "notes": str(spell_data['notes']),
-                "overcast": overcast,
-            }
-            spells.append(spell)
+                # Validate and set defaults for required fields
+                name = spell_data.get('name', f"Unnamed Spell {i+1}")
+                damage = spell_data.get('damage', "1d6")
+                if not damage or damage.strip() == "":
+                    damage = "1d6"
+
+                mana_cost = spell_data.get('mana_cost', 5)
+                try:
+                    mana_cost = int(mana_cost)
+                except (ValueError, TypeError):
+                    mana_cost = 5
+
+                roll_type = spell_data.get('roll_type', "Attack")
+                notes = spell_data.get('notes', "A magical spell.")
+
+                # Build overcast dict from enabled flag
+                overcast_enabled = spell_data.get("overcast_enabled", False)
+                overcast = {
+                    "enabled": overcast_enabled,
+                    "scale": 3 if overcast_enabled else 0,
+                    "power": 0.85,
+                    "cap": 999
+                }
+
+                spell = {
+                    "name": str(name),
+                    "favorite": False,
+                    "roll_type": str(roll_type),
+                    "damage": str(damage),
+                    "mana_cost": mana_cost,
+                    "notes": str(notes),
+                    "overcast": overcast,
+                }
+                spells.append(spell)
+            except Exception as spell_error:
+                print(f"Warning: Failed to process spell {i}: {spell_error}. Using default spell.")
+                spells.append({
+                    "name": f"Arcane Spell {i+1}",
+                    "favorite": False,
+                    "roll_type": "Attack",
+                    "damage": "1d6",
+                    "mana_cost": 5,
+                    "notes": "A basic magical spell.",
+                    "overcast": {"enabled": False, "scale": 0, "power": 0.85, "cap": 999},
+                })
 
         # Pad to 5 if needed
         while len(spells) < 5:
@@ -1069,9 +1068,9 @@ def build_damage_expr(count: int, size: int, bonus: int) -> str:
     return expr
 
 
-def generate_spell_upgrades_with_ollama(base_spell: dict, category: str, tier: str) -> list:
+def generate_spell_upgrades_with_ollama(base_spell: dict, category: str, tier: str, training_prompt: str = "") -> list:
     """
-    Generate 5 spell upgrade options using Ollama LLM (gemma3:1b).
+    Generate 5 spell upgrade options using Ollama LLM (gemma3:4b).
 
     Returns list of 5 upgraded spell dicts or raises exception if Ollama fails.
     """
@@ -1083,55 +1082,32 @@ def generate_spell_upgrades_with_ollama(base_spell: dict, category: str, tier: s
     notes = base_spell.get("notes", "")
     overcast = base_spell.get("overcast", {})
 
-    # Build detailed prompt for the LLM
-    system_prompt = f"""You are a creative fantasy spell designer for a tabletop RPG. Generate exactly 5 upgrade options for the following existing spell.
+    # Build simplified prompt for better JSON compliance
+    training_context = f"\n\nTraining Focus: {training_prompt}" if training_prompt else ""
 
-CURRENT SPELL:
-- Name: {name}
-- Damage: {damage}
-- Mana Cost: {mana_cost}
-- Roll Type: {roll_type}
-- Description: {notes}
-- Overcast: {"Enabled" if overcast.get("enabled") else "Disabled"}
+    system_prompt = f"""Generate 5 spell upgrades as valid JSON. Return ONLY the JSON array, nothing else.
 
-UPGRADE REQUIREMENTS:
-1. Generate 5 distinct upgrade paths with different strategies:
-   - Enhanced: Increase damage (bigger/more dice)
-   - Efficient: Reduce mana cost by 15-25%
-   - Empowered: Enable or improve overcast scaling
-   - Improved: Balanced upgrade (small damage boost + mana reduction)
-   - Superior: Major damage increase with slight mana cost increase
+Original Spell:
+Name: {name}
+Damage: {damage}
+Mana: {mana_cost}
+Type: {roll_type}{training_context}
 
-2. Each upgrade MUST have ALL these fields:
-   - name: Add prefix like "Enhanced", "Efficient", "Empowered", "Improved", or "Superior" to base name
-   - roll_type: MUST be exactly "{roll_type}" (keep same as original)
-   - damage: MUST be dice notation like "2d6", "3d8+2", "1d10" - REQUIRED
-   - mana_cost: MUST be a number between 1-50 - REQUIRED
-   - notes: Original description with note about what improved - REQUIRED
-   - overcast_enabled: true or false
-
-3. Damage format rules: Must be "XdY" or "XdY+Z" or "XdY-Z" format
-
-CRITICAL: You MUST return ONLY valid JSON. No text before or after. Just the JSON array.
-
-OUTPUT FORMAT (MUST be exactly this structure):
+Return exactly this JSON format with 5 objects:
 [
-  {{
-    "name": "Enhanced {name}",
-    "roll_type": "{roll_type}",
-    "damage": "3d8",
-    "mana_cost": {int(mana_cost * 1.0)},
-    "notes": "{notes[:50]}... [Upgraded: Increased damage]",
-    "overcast_enabled": false
-  }}
+  {{"name": "Enhanced {name}", "roll_type": "{roll_type}", "damage": "2d8", "mana_cost": {mana_cost}, "notes": "Upgraded for more damage", "overcast_enabled": false}},
+  {{"name": "Efficient {name}", "roll_type": "{roll_type}", "damage": "{damage}", "mana_cost": {max(1, int(mana_cost * 0.8))}, "notes": "Upgraded for less mana", "overcast_enabled": false}},
+  {{"name": "Empowered {name}", "roll_type": "{roll_type}", "damage": "{damage}", "mana_cost": {mana_cost}, "notes": "Upgraded with overcast", "overcast_enabled": true}},
+  {{"name": "Improved {name}", "roll_type": "{roll_type}", "damage": "2d6+1", "mana_cost": {max(1, int(mana_cost * 0.9))}, "notes": "Balanced upgrade", "overcast_enabled": false}},
+  {{"name": "Superior {name}", "roll_type": "{roll_type}", "damage": "3d8+2", "mana_cost": {int(mana_cost * 1.1)}, "notes": "Major power increase", "overcast_enabled": false}}
 ]
 
-Remember: Return ONLY the JSON array. All fields are required. Generate 5 upgrades total."""
+CRITICAL: Output ONLY the JSON array above. No explanations. Start with [ and end with ]."""
 
     try:
         # Call Ollama
         response = ollama.generate(
-            model='gemma3:1b',
+            model='gemma3:4b',  # Using gemma3:4b - change to your installed model if different
             prompt=system_prompt,
             format='json',
             options={
@@ -1161,57 +1137,80 @@ Remember: Return ONLY the JSON array. All fields are required. Generate 5 upgrad
         except json.JSONDecodeError as je:
             raise Exception(f"Failed to parse JSON: {je}. Response: {json_text[:200]}")
 
+        # Handle dict responses - try to extract list from common keys
+        if isinstance(upgrades_data, dict):
+            # Try common keys that might contain the upgrade list
+            for key in ['upgrades', 'spells', 'data', 'results', 'items']:
+                if key in upgrades_data and isinstance(upgrades_data[key], list):
+                    upgrades_data = upgrades_data[key]
+                    break
+            else:
+                # If still a dict and looks like a single upgrade, wrap it in a list
+                if 'name' in upgrades_data or 'damage' in upgrades_data:
+                    upgrades_data = [upgrades_data]
+                else:
+                    raise Exception(f"Expected JSON array or dict with upgrade data, got dict with keys: {list(upgrades_data.keys())}")
+
         if not isinstance(upgrades_data, list):
             raise Exception(f"Expected JSON array, got {type(upgrades_data)}")
 
         # Convert to proper spell format
         upgrades = []
         for i, upgrade_data in enumerate(upgrades_data[:5]):  # Ensure max 5
-            if not isinstance(upgrade_data, dict):
-                print(f"Warning: Upgrade {i} is not a dict, skipping")
-                continue
-
-            # Validate required fields
-            if 'name' not in upgrade_data:
-                upgrade_data['name'] = f"Upgraded {name} {i+1}"
-            if 'damage' not in upgrade_data or not upgrade_data['damage']:
-                upgrade_data['damage'] = damage if damage else "1d6"
-            if 'mana_cost' not in upgrade_data:
-                upgrade_data['mana_cost'] = mana_cost
-            if 'roll_type' not in upgrade_data:
-                upgrade_data['roll_type'] = roll_type
-            if 'notes' not in upgrade_data:
-                upgrade_data['notes'] = notes
-
-            # Build overcast dict
-            overcast_enabled = upgrade_data.get("overcast_enabled", False)
-            new_overcast = overcast.copy() if isinstance(overcast, dict) else {}
-            if overcast_enabled and not new_overcast.get("enabled"):
-                # Enable overcast
-                new_overcast["enabled"] = True
-                new_overcast["scale"] = 3
-                new_overcast["power"] = 0.85
-                new_overcast["cap"] = 999
-            elif overcast_enabled and new_overcast.get("enabled"):
-                # Enhance existing overcast
-                new_overcast["scale"] = new_overcast.get("scale", 3) + 1
-
-            # Convert mana_cost to int safely
             try:
-                upgrade_mana = int(upgrade_data['mana_cost'])
-            except (ValueError, TypeError):
-                upgrade_mana = mana_cost
+                if not isinstance(upgrade_data, dict):
+                    print(f"Warning: Upgrade {i} is not a dict, skipping")
+                    continue
 
-            upgrade = {
-                "name": str(upgrade_data['name']),
-                "favorite": False,
-                "roll_type": str(upgrade_data['roll_type']),
-                "damage": str(upgrade_data['damage']),
-                "mana_cost": upgrade_mana,
-                "notes": str(upgrade_data['notes']),
-                "overcast": new_overcast,
-            }
-            upgrades.append(upgrade)
+                # Validate and set defaults for required fields
+                upgrade_name = upgrade_data.get('name', f"Upgraded {name} {i+1}")
+                upgrade_damage = upgrade_data.get('damage', damage if damage else "1d6")
+                if not upgrade_damage or upgrade_damage.strip() == "":
+                    upgrade_damage = damage if damage else "1d6"
+
+                upgrade_mana = upgrade_data.get('mana_cost', mana_cost)
+                try:
+                    upgrade_mana = int(upgrade_mana)
+                except (ValueError, TypeError):
+                    upgrade_mana = mana_cost
+
+                upgrade_roll_type = upgrade_data.get('roll_type', roll_type)
+                upgrade_notes = upgrade_data.get('notes', notes)
+
+                # Build overcast dict
+                overcast_enabled = upgrade_data.get("overcast_enabled", False)
+                new_overcast = overcast.copy() if isinstance(overcast, dict) else {}
+                if overcast_enabled and not new_overcast.get("enabled"):
+                    # Enable overcast
+                    new_overcast["enabled"] = True
+                    new_overcast["scale"] = 3
+                    new_overcast["power"] = 0.85
+                    new_overcast["cap"] = 999
+                elif overcast_enabled and new_overcast.get("enabled"):
+                    # Enhance existing overcast
+                    new_overcast["scale"] = new_overcast.get("scale", 3) + 1
+
+                upgrade = {
+                    "name": str(upgrade_name),
+                    "favorite": False,
+                    "roll_type": str(upgrade_roll_type),
+                    "damage": str(upgrade_damage),
+                    "mana_cost": upgrade_mana,
+                    "notes": str(upgrade_notes),
+                    "overcast": new_overcast,
+                }
+                upgrades.append(upgrade)
+            except Exception as upgrade_error:
+                print(f"Warning: Failed to process upgrade {i}: {upgrade_error}. Using default upgrade.")
+                upgrades.append({
+                    "name": f"Improved {name} {i+1}",
+                    "favorite": False,
+                    "roll_type": roll_type,
+                    "damage": damage if damage else "1d6",
+                    "mana_cost": max(1, int(mana_cost * 0.9)),
+                    "notes": notes + " [Minor upgrade]",
+                    "overcast": overcast.copy() if isinstance(overcast, dict) else {},
+                })
 
         # Pad to 5 if needed
         while len(upgrades) < 5:
@@ -1234,7 +1233,7 @@ Remember: Return ONLY the JSON array. All fields are required. Generate 5 upgrad
         raise Exception(error_msg)
 
 
-def generate_spell_upgrades(base_spell: dict, category: str, tier: str) -> list:
+def generate_spell_upgrades(base_spell: dict, category: str, tier: str, training_prompt: str = "") -> list:
     """
     Generate 5 upgrade options for a spell using Ollama AI (with template fallback).
 
@@ -1243,7 +1242,7 @@ def generate_spell_upgrades(base_spell: dict, category: str, tier: str) -> list:
     # Try Ollama first if available
     if OLLAMA_AVAILABLE:
         try:
-            return generate_spell_upgrades_with_ollama(base_spell, category, tier)
+            return generate_spell_upgrades_with_ollama(base_spell, category, tier, training_prompt)
         except Exception as e:
             print(f"Ollama upgrade generation failed, using template fallback: {e}")
 
@@ -2099,8 +2098,14 @@ class CharacterApp(tk.Tk):
             row=10, column=1, sticky="w", padx=6, pady=(0, 8)
         )
 
+        json_row = ttk.Frame(details)
+        json_row.grid(row=11, column=1, sticky="w", padx=6, pady=(0, 8))
+
+        ttk.Button(json_row, text="Copy JSON", command=lambda s=key: self.ability_copy_json_selected(s)).pack(side=tk.LEFT)
+        ttk.Button(json_row, text="Import JSON…", command=lambda s=key: self.ability_import_json_dialog(s)).pack(side=tk.LEFT, padx=8)
+
         move_box = ttk.LabelFrame(details, text="Transfer")
-        move_box.grid(row=11, column=1, sticky="ew", padx=6, pady=(6, 8))
+        move_box.grid(row=12, column=1, sticky="ew", padx=6, pady=(6, 8))
 
         ttk.Label(move_box, text="Move to:").pack(side=tk.LEFT, padx=(6, 4), pady=6)
 
@@ -2117,14 +2122,6 @@ class CharacterApp(tk.Tk):
             text="Move Selected",
             command=lambda fs=key: self.ability_move_selected(fs, self.ability_move_target[fs].get())
         ).pack(side=tk.LEFT, padx=(6, 6), pady=6)
-
-
-        json_row = ttk.Frame(details)
-        json_row.grid(row=10, column=1, sticky="w", padx=6, pady=(0, 8))
-
-        ttk.Button(json_row, text="Copy JSON", command=lambda s=key: self.ability_copy_json_selected(s)).pack(side=tk.LEFT)
-        ttk.Button(json_row, text="Import JSON…", command=lambda s=key: self.ability_import_json_dialog(s)).pack(side=tk.LEFT, padx=8)
-
 
         details.grid_columnconfigure(1, weight=1)
         details.grid_rowconfigure(8, weight=1)
@@ -2602,6 +2599,21 @@ class CharacterApp(tk.Tk):
         current_info = f"Name: {ab.get('name', '')}  |  Damage: {ab.get('damage', 'None')}  |  Mana: {ab.get('mana_cost', 0)}"
         ttk.Label(current_frame, text=current_info, font=("TkDefaultFont", 9)).pack(padx=8, pady=8)
 
+        # Training prompt input
+        prompt_frame = ttk.LabelFrame(win, text="Training/Research Prompt (Optional)")
+        prompt_frame.pack(fill=tk.X, padx=10, pady=(5, 5))
+
+        ttk.Label(
+            prompt_frame,
+            text="Describe how your character trained to improve this spell:",
+            font=("TkDefaultFont", 9, "italic"),
+            foreground="gray"
+        ).pack(anchor="w", padx=8, pady=(4, 2))
+
+        prompt_text = tk.Text(prompt_frame, wrap="word", height=3)
+        prompt_text.pack(fill=tk.X, padx=8, pady=(0, 8))
+        prompt_text.insert("1.0", "Practiced to increase power and efficiency...")
+
         # Generation button
         gen_btn_frame = ttk.Frame(win)
         gen_btn_frame.pack(fill=tk.X, padx=10, pady=5)
@@ -2662,12 +2674,15 @@ class CharacterApp(tk.Tk):
 
         # Functions
         def on_generate():
+            # Get training prompt
+            prompt = prompt_text.get("1.0", tk.END).strip()
+
             # Get character context
             tier = self.var_tier.get() or "T1"
 
-            # Generate upgrades
+            # Generate upgrades (with optional prompt for Ollama)
             nonlocal generated_upgrades
-            generated_upgrades = generate_spell_upgrades(ab, key, tier)
+            generated_upgrades = generate_spell_upgrades(ab, key, tier, training_prompt=prompt)
 
             # Populate listbox
             options_list.delete(0, tk.END)
