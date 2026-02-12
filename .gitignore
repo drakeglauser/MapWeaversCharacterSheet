@@ -1,0 +1,13 @@
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment
+.env
+*.egg-info/
