@@ -140,6 +140,9 @@ class DamageLabTab(ttk.Frame):
 
         self.var_info = tk.StringVar(value="Select an item/ability.")
 
+        # Theme colors (set by parent via apply_theme)
+        self._colors = None
+
         self._build_ui()
         self.refresh_actions()
 
@@ -225,6 +228,20 @@ class DamageLabTab(ttk.Frame):
 
         self.canvas = tk.Canvas(canvas_frame, height=320)
         self.canvas.pack(fill=tk.BOTH, expand=True)
+
+    # ---------- Theme ----------
+    def apply_theme(self, colors: dict):
+        """Apply theme colors to raw tk widgets in this tab."""
+        self._colors = colors
+        self.lb.configure(
+            bg=colors["entry_bg"], fg=colors["entry_fg"],
+            selectbackground=colors["select_bg"],
+            selectforeground=colors["select_fg"],
+        )
+        self.canvas.configure(bg=colors["canvas_bg"])
+        # Re-draw the canvas with new colors if we have data
+        if self.selected_ref is not None:
+            self.plot()
 
     # ---------- Action list ----------
     def refresh_actions(self):
@@ -352,6 +369,10 @@ class DamageLabTab(ttk.Frame):
         c = self.canvas
         c.delete("all")
 
+        # Theme-aware colors
+        fg = self._colors["canvas_fg"] if self._colors else "black"
+        line_color = self._colors["canvas_line"] if self._colors else "black"
+
         w = max(300, c.winfo_width())
         h = max(240, c.winfo_height())
 
@@ -361,7 +382,7 @@ class DamageLabTab(ttk.Frame):
         plot_h = max(1, h - mt - mb)
 
         if not xs or not ys or len(xs) != len(ys):
-            c.create_text(w // 2, h // 2, text="No data to plot.")
+            c.create_text(w // 2, h // 2, text="No data to plot.", fill=fg)
             return
 
         x_min, x_max = min(xs), max(xs)
@@ -382,32 +403,32 @@ class DamageLabTab(ttk.Frame):
             return mt + (y_max - y) * plot_h / (y_max - y_min)
 
         # axes
-        c.create_line(ml, mt, ml, mt + plot_h)                  # y-axis
-        c.create_line(ml, mt + plot_h, ml + plot_w, mt + plot_h) # x-axis
+        c.create_line(ml, mt, ml, mt + plot_h, fill=fg)                  # y-axis
+        c.create_line(ml, mt + plot_h, ml + plot_w, mt + plot_h, fill=fg) # x-axis
 
         # ticks
         for i in range(6):
             tx = x_min + (x_max - x_min) * i / 5
             px = x_to_px(tx)
-            c.create_line(px, mt + plot_h, px, mt + plot_h + 5)
-            c.create_text(px, mt + plot_h + 18, text=str(int(round(tx))), font=("Segoe UI", 9))
+            c.create_line(px, mt + plot_h, px, mt + plot_h + 5, fill=fg)
+            c.create_text(px, mt + plot_h + 18, text=str(int(round(tx))), font=("Segoe UI", 9), fill=fg)
 
         for i in range(6):
             ty = y_min + (y_max - y_min) * i / 5
             py = y_to_px(ty)
-            c.create_line(ml - 5, py, ml, py)
-            c.create_text(ml - 12, py, text=str(int(round(ty))), anchor="e", font=("Segoe UI", 9))
+            c.create_line(ml - 5, py, ml, py, fill=fg)
+            c.create_text(ml - 12, py, text=str(int(round(ty))), anchor="e", font=("Segoe UI", 9), fill=fg)
 
         # labels
-        c.create_text(w // 2, 14, text=title, font=("Segoe UI", 11, "bold"))
-        c.create_text(w // 2, h - 18, text=xlabel, font=("Segoe UI", 10))
-        c.create_text(18, h // 2, text=ylabel, angle=90, font=("Segoe UI", 10))
+        c.create_text(w // 2, 14, text=title, font=("Segoe UI", 11, "bold"), fill=fg)
+        c.create_text(w // 2, h - 18, text=xlabel, font=("Segoe UI", 10), fill=fg)
+        c.create_text(18, h // 2, text=ylabel, angle=90, font=("Segoe UI", 10), fill=fg)
 
         # polyline
         pts = []
         for x, y in zip(xs, ys):
             pts.extend([x_to_px(x), y_to_px(y)])
-        c.create_line(*pts, width=2)
+        c.create_line(*pts, width=2, fill=line_color)
 
     def compute_one(self):
         if self.selected_ref is None:
@@ -476,8 +497,9 @@ class DamageLabTab(ttk.Frame):
             # Damage vs Mana (abilities only)
             if self.selected_kind != "ability":
                 self.canvas.delete("all")
+                _fg = self._colors["canvas_fg"] if self._colors else "black"
                 self.canvas.create_text(
-                    10, 10, anchor="nw",
+                    10, 10, anchor="nw", fill=_fg,
                     text="Damage vs Mana only applies to abilities.\nPick an ability, or switch to Damage vs Roll."
                 )
                 return

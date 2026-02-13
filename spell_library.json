@@ -49,6 +49,31 @@
         "tier": "T1",
         "category": "core"
       }
+    },
+    {
+      "id": "20260212_174330_8f4c24",
+      "spell": {
+        "name": "Tongue of Babel",
+        "favorite": false,
+        "roll_type": "None",
+        "damage": "0",
+        "mana_cost": 0,
+        "notes": "This spell doesn't directly translate text, but creates a localized resonance that allows comprehension of spoken language for the user. The users own words will also be translated into the most common spoken language for those around, meaning everyone heres the user speak in their own core language. This effect is passive and can be toggled on and off.",
+        "overcast": {
+          "enabled": false,
+          "scale": 0,
+          "power": 0.85,
+          "cap": 999
+        }
+      },
+      "metadata": {
+        "date_created": "2026-02-12T17:43:30.933192",
+        "source_character": "placeholder",
+        "element": "unknown",
+        "archetype": "unknown",
+        "tier": "T1",
+        "category": "outer"
+      }
     }
   ]
 }

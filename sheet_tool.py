@@ -1,6 +1,7 @@
 # character_sheet.py
 import json
 import math
+import os
 import random
 import re
 import sys
@@ -8,6 +9,138 @@ from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+
+# ---------------- Theme / Dark Mode ----------------
+
+DARK_COLORS = {
+    "bg": "#1e1e1e",
+    "fg": "#d4d4d4",
+    "entry_bg": "#2d2d2d",
+    "entry_fg": "#d4d4d4",
+    "select_bg": "#264f78",
+    "select_fg": "#ffffff",
+    "accent": "#569cd6",
+    "gray": "#808080",
+    "red": "#f44747",
+    "frame_bg": "#252526",
+    "button_bg": "#3c3c3c",
+    "canvas_bg": "#1e1e1e",
+    "canvas_fg": "#d4d4d4",
+    "canvas_line": "#569cd6",
+    "tab_bg": "#2d2d2d",
+    "tab_selected": "#1e1e1e",
+    "labelframe_bg": "#252526",
+}
+
+LIGHT_COLORS = {
+    "bg": "#f0f0f0",
+    "fg": "#000000",
+    "entry_bg": "#ffffff",
+    "entry_fg": "#000000",
+    "select_bg": "#0078d7",
+    "select_fg": "#ffffff",
+    "accent": "#0078d7",
+    "gray": "gray",
+    "red": "red",
+    "frame_bg": "#f0f0f0",
+    "button_bg": "#e1e1e1",
+    "canvas_bg": "#ffffff",
+    "canvas_fg": "#000000",
+    "canvas_line": "#0078d7",
+    "tab_bg": "#e1e1e1",
+    "tab_selected": "#f0f0f0",
+    "labelframe_bg": "#f0f0f0",
+}
+
+PREFS_PATH = Path(os.path.expanduser("~")) / ".homebrew_sheet_prefs.json"
+
+
+def load_theme_pref() -> bool:
+    """Returns True if dark mode was saved, else False."""
+    try:
+        with open(PREFS_PATH, "r") as f:
+            return json.load(f).get("dark_mode", False)
+    except Exception:
+        return False
+
+
+def save_theme_pref(dark: bool):
+    try:
+        with open(PREFS_PATH, "w") as f:
+            json.dump({"dark_mode": dark}, f)
+    except Exception:
+        pass
+
+
+def apply_ttk_theme(style: ttk.Style, colors: dict):
+    """Configure the ttk Style object for all widget types."""
+    style.theme_use("clam")
+
+    style.configure("TFrame", background=colors["bg"])
+    style.configure("TLabel", background=colors["bg"], foreground=colors["fg"])
+    style.configure("TLabelframe", background=colors["labelframe_bg"],
+                     foreground=colors["fg"])
+    style.configure("TLabelframe.Label", background=colors["labelframe_bg"],
+                     foreground=colors["fg"])
+    style.configure("TButton", background=colors["button_bg"],
+                     foreground=colors["fg"])
+    style.map("TButton",
+              background=[("active", colors["accent"])],
+              foreground=[("active", colors["select_fg"])])
+    style.configure("TEntry", fieldbackground=colors["entry_bg"],
+                     foreground=colors["entry_fg"],
+                     insertcolor=colors["fg"])
+    style.configure("TCombobox", fieldbackground=colors["entry_bg"],
+                     foreground=colors["entry_fg"],
+                     selectbackground=colors["select_bg"],
+                     selectforeground=colors["select_fg"])
+    style.map("TCombobox",
+              fieldbackground=[("readonly", colors["entry_bg"])],
+              foreground=[("readonly", colors["entry_fg"])])
+    style.configure("TCheckbutton", background=colors["bg"],
+                     foreground=colors["fg"])
+    style.map("TCheckbutton",
+              background=[("active", colors["bg"])])
+    style.configure("TNotebook", background=colors["bg"])
+    style.configure("TNotebook.Tab", background=colors["tab_bg"],
+                     foreground=colors["fg"], padding=[8, 4])
+    style.map("TNotebook.Tab",
+              background=[("selected", colors["tab_selected"])],
+              foreground=[("selected", colors["fg"])])
+    style.configure("TSeparator", background=colors["gray"])
+    style.configure("TScrollbar", background=colors["button_bg"],
+                     troughcolor=colors["bg"])
+
+    # Special named styles for gray/red info labels
+    style.configure("Gray.TLabel", background=colors["bg"],
+                     foreground=colors["gray"])
+    style.configure("Red.TLabel", background=colors["bg"],
+                     foreground=colors["red"])
+
+
+def style_tk_widget(widget, colors: dict):
+    """Apply theme colors to a raw tk widget (Text, Listbox, Canvas)."""
+    wclass = widget.winfo_class()
+    if wclass == "Text":
+        widget.configure(
+            bg=colors["entry_bg"], fg=colors["entry_fg"],
+            insertbackground=colors["fg"],
+            selectbackground=colors["select_bg"],
+            selectforeground=colors["select_fg"],
+        )
+    elif wclass == "Listbox":
+        widget.configure(
+            bg=colors["entry_bg"], fg=colors["entry_fg"],
+            selectbackground=colors["select_bg"],
+            selectforeground=colors["select_fg"],
+        )
+    elif wclass == "Canvas":
+        widget.configure(bg=colors["canvas_bg"])
+
+
+def style_toplevel(win, colors: dict):
+    """Apply theme background to a Toplevel window."""
+    win.configure(bg=colors["bg"])
 
 # Ollama for AI-powered spell generation
 try:
@@ -1237,14 +1370,12 @@ def generate_spell_upgrades(base_spell: dict, category: str, tier: str, training
 
 # ---------------- App ----------------
 
-class CharacterApp(tk.Tk):
-    def __init__(self, char_path: Path, is_dm: bool = False):
-        super().__init__()
+class CharacterSheet(ttk.Frame):
+    def __init__(self, parent, char_path: Path, is_dm: bool = False):
+        super().__init__(parent)
 
         self.is_dm = is_dm
         self.char_path = char_path
-        self.title(f"Homebrew Character Sheet — {self.char_path.name}")
-        self.geometry("1150x780")
 
         self.char = load_character(self.char_path)
         _migrate_stats_schema(self.char)
@@ -1329,15 +1460,19 @@ class CharacterApp(tk.Tk):
         self.var_combat_mana_spend = tk.StringVar()
         self.var_combat_result = tk.StringVar(value="")
 
+        # Track raw tk widgets that need manual theme styling
+        self._tk_widgets = []  # list of tk.Text / tk.Listbox / tk.Canvas
+
         self._build_ui()
         self.refresh_from_model()
-                # --- Close / dirty tracking ---
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # Normalize current UI -> model once, then snapshot as "last saved"
         # (prevents "prompt to save" immediately after opening due to sorting/canonicalization)
         self.apply_to_model()
         self._last_saved_state = self._serialize_char(self.char)
+
+        # Update tab label when name changes
+        self.var_name.trace_add("write", self._on_name_changed)
 
 
     # ---------------- UI ----------------
@@ -1467,6 +1602,7 @@ class CharacterApp(tk.Tk):
         self.combat_list = tk.Listbox(c_left, height=14)
         self.combat_list.pack(fill=tk.BOTH, expand=True)
         self.combat_list.bind("<<ListboxSelect>>", lambda _e: self.on_combat_select())
+        self._tk_widgets.append(self.combat_list)
 
         ttk.Button(c_left, text="Refresh list", command=self.refresh_combat_list).pack(fill=tk.X, pady=(6, 0))
 
@@ -1564,35 +1700,75 @@ class CharacterApp(tk.Tk):
             messagebox.showerror("Save failed", f"Could not save:\n{e}")
             return False
 
-    def on_close(self):
-        """
-        Prompt to save on exit if there are unsaved changes:
-          Yes = save then exit
-          No  = exit without saving
-          Cancel = do nothing
-        """
-        # Update model from UI so we compare the *actual* current state
+    def get_display_name(self) -> str:
+        name = self.var_name.get().strip()
+        return name if name else self.char_path.stem
+
+    def is_dirty(self) -> bool:
         self.apply_to_model()
         current_state = self._serialize_char(self.char)
+        return current_state != getattr(self, "_last_saved_state", "")
 
-        if current_state != getattr(self, "_last_saved_state", ""):
-            choice = messagebox.askyesnocancel(
-                "Unsaved Changes",
-                "You have unsaved changes.\n\nSave before exiting?"
-            )
-            if choice is True:
-                # Save silently; if it fails, don't exit.
-                if not self._save_to_disk(show_popup=False):
-                    return
-                self.destroy()
-            elif choice is False:
-                self.destroy()
-            else:
-                # Cancel / X
-                return
+    def prompt_save_if_dirty(self) -> str:
+        """
+        If dirty, prompt user. Returns:
+          'saved'       - user chose to save (and save succeeded)
+          'discarded'   - user chose not to save
+          'cancelled'   - user cancelled
+          'clean'       - no unsaved changes
+          'save_failed' - user chose to save but it failed
+        """
+        if not self.is_dirty():
+            return "clean"
+
+        char_name = self.get_display_name()
+        choice = messagebox.askyesnocancel(
+            "Unsaved Changes",
+            f"'{char_name}' has unsaved changes.\n\nSave before closing?"
+        )
+        if choice is True:
+            if self._save_to_disk(show_popup=False):
+                return "saved"
+            return "save_failed"
+        elif choice is False:
+            return "discarded"
         else:
-            self.destroy()
+            return "cancelled"
 
+    def _on_name_changed(self, *args):
+        app = self.winfo_toplevel()
+        if hasattr(app, 'master_notebook') and hasattr(app, '_update_title'):
+            try:
+                app.master_notebook.tab(self, text=self.get_display_name())
+                app._update_title()
+            except Exception:
+                pass
+        elif hasattr(app, '_update_title'):
+            try:
+                app._update_title()
+            except Exception:
+                pass
+
+
+    # ---------------- Theme ----------------
+
+    def apply_theme(self, colors: dict):
+        """Apply dark/light theme to all raw tk widgets in this sheet."""
+        for w in self._tk_widgets:
+            try:
+                style_tk_widget(w, colors)
+            except Exception:
+                pass
+        # Also theme the damage lab
+        if hasattr(self, "damage_lab"):
+            self.damage_lab.apply_theme(colors)
+
+    def _get_current_colors(self):
+        """Get the current theme colors from the app."""
+        app = self.winfo_toplevel()
+        if hasattr(app, "_current_colors"):
+            return app._current_colors
+        return LIGHT_COLORS
 
     # ---------------- Inventory ----------------
 
@@ -1629,6 +1805,7 @@ class CharacterApp(tk.Tk):
         lb.bind("<Double-Button-1>", lambda _e, k=key: self.inv_toggle_favorite(k))
         lb.bind("<<ListboxSelect>>", lambda _e, k=key: self.inv_on_select(k))
         setattr(self, f"inv_list_{key}", lb)
+        self._tk_widgets.append(lb)
 
         controls = ttk.Frame(left)
         controls.pack(fill=tk.X, pady=(8, 0))
@@ -1661,6 +1838,7 @@ class CharacterApp(tk.Tk):
         notes_box = tk.Text(details, wrap="word", height=10)
         notes_box.grid(row=4, column=1, sticky="nsew", padx=6, pady=4)
         setattr(self, f"inv_notes_box_{key}", notes_box)
+        self._tk_widgets.append(notes_box)
 
         ttk.Button(details, text="Update Selected", command=lambda k=key: self.inv_update_selected(k)).grid(
             row=5, column=1, sticky="w", padx=6, pady=(6, 8)
@@ -1810,16 +1988,19 @@ class CharacterApp(tk.Tk):
         messagebox.showinfo("Copy JSON", "Item JSON copied to clipboard.")
 
     def inv_import_json_dialog(self, key: str):
-        win = tk.Toplevel(self)
+        win = tk.Toplevel(self.winfo_toplevel())
         win.title(f"Import Item JSON → {key}")
         win.geometry("520x620")
         win.transient(self)
         win.grab_set()
+        colors = self._get_current_colors()
+        style_toplevel(win, colors)
 
         ttk.Label(win, text="Paste JSON for an item OR a list of items:").pack(anchor="w", padx=10, pady=(10, 4))
 
         txt = tk.Text(win, wrap="none")
         txt.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        style_tk_widget(txt, colors)
 
         # helpful: prefill with clipboard
         clip = self._clipboard_get()
@@ -1827,7 +2008,7 @@ class CharacterApp(tk.Tk):
             txt.insert("1.0", clip)
 
         status = tk.StringVar(value="")
-        ttk.Label(win, textvariable=status, foreground="gray").pack(anchor="w", padx=10, pady=(0, 8))
+        ttk.Label(win, textvariable=status, foreground=colors["gray"]).pack(anchor="w", padx=10, pady=(0, 8))
 
         def parse_items():
             raw = txt.get("1.0", tk.END).strip()
@@ -1936,6 +2117,7 @@ class CharacterApp(tk.Tk):
         lb.bind("<Double-Button-1>", lambda _e, k=key: self.ability_toggle_favorite(k))
         lb.bind("<<ListboxSelect>>", lambda _e, k=key: self.ability_on_select(k))
         setattr(self, f"ability_list_{key}", lb)
+        self._tk_widgets.append(lb)
 
         controls = ttk.Frame(left)
         controls.pack(fill=tk.X, pady=(8, 0))
@@ -1982,6 +2164,7 @@ class CharacterApp(tk.Tk):
         notes_box = tk.Text(details, wrap="word", height=10)
         notes_box.grid(row=8, column=1, sticky="nsew", padx=6, pady=4)
         setattr(self, f"ability_notes_box_{key}", notes_box)
+        self._tk_widgets.append(notes_box)
 
         ttk.Button(details, text="Update Selected", command=lambda k=key: self.ability_update_selected(k)).grid(
             row=9, column=1, sticky="w", padx=6, pady=(6, 8)
@@ -2136,23 +2319,26 @@ class CharacterApp(tk.Tk):
         messagebox.showinfo("Copy JSON", "Ability JSON copied to clipboard.")
 
     def ability_import_json_dialog(self, slot: str):
-        win = tk.Toplevel(self)
+        win = tk.Toplevel(self.winfo_toplevel())
         win.title(f"Import Ability JSON → {slot}")
         win.geometry("520x620")
         win.transient(self)
         win.grab_set()
+        colors = self._get_current_colors()
+        style_toplevel(win, colors)
 
         ttk.Label(win, text="Paste JSON for an ability OR a list of abilities:").pack(anchor="w", padx=10, pady=(10, 4))
 
         txt = tk.Text(win, wrap="none")
         txt.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        style_tk_widget(txt, colors)
 
         clip = self._clipboard_get()
         if clip.strip():
             txt.insert("1.0", clip)
 
         status = tk.StringVar(value="")
-        ttk.Label(win, textvariable=status, foreground="gray").pack(anchor="w", padx=10, pady=(0, 8))
+        ttk.Label(win, textvariable=status, foreground=colors["gray"]).pack(anchor="w", padx=10, pady=(0, 8))
 
         def parse_abs():
             raw = txt.get("1.0", tk.END).strip()
@@ -2237,11 +2423,13 @@ class CharacterApp(tk.Tk):
         Args:
             key: ability category ("core", "inner", or "outer")
         """
-        win = tk.Toplevel(self)
+        win = tk.Toplevel(self.winfo_toplevel())
         win.title(f"Generate Spell → {key}")
         win.geometry("700x650")
         win.transient(self)
         win.grab_set()
+        colors = self._get_current_colors()
+        style_toplevel(win, colors)
 
         # Status message
         status = tk.StringVar(value="")
@@ -2254,11 +2442,12 @@ class CharacterApp(tk.Tk):
             prompt_frame,
             text="Describe what your character has been researching or training:",
             font=("TkDefaultFont", 9, "italic"),
-            foreground="gray"
+            foreground=colors["gray"]
         ).pack(anchor="w", padx=8, pady=(4, 2))
 
         prompt_text = tk.Text(prompt_frame, wrap="word", height=4)
         prompt_text.pack(fill=tk.X, padx=8, pady=(0, 8))
+        style_tk_widget(prompt_text, colors)
         prompt_text.insert("1.0", "I practiced fire magic to attack enemies...")
 
         # Generation button
@@ -2271,6 +2460,7 @@ class CharacterApp(tk.Tk):
 
         options_list = tk.Listbox(options_frame, height=5, exportselection=False)
         options_list.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        style_tk_widget(options_list, colors)
 
         # Store generated spells
         generated_spells = []
@@ -2311,6 +2501,7 @@ class CharacterApp(tk.Tk):
         ttk.Label(edit_frame, text="Description:").grid(row=6, column=0, sticky="nw", padx=6, pady=4)
         notes_box = tk.Text(edit_frame, wrap="word", height=4)
         notes_box.grid(row=6, column=1, sticky="nsew", padx=6, pady=4)
+        style_tk_widget(notes_box, colors)
 
         edit_frame.grid_rowconfigure(6, weight=1)
         edit_frame.grid_columnconfigure(1, weight=1)
@@ -2455,7 +2646,7 @@ class CharacterApp(tk.Tk):
 
         # Buttons
         ttk.Button(gen_btn_frame, text="Generate Options", command=on_generate).pack(side=tk.LEFT, padx=4)
-        ttk.Label(gen_btn_frame, textvariable=status, foreground="gray").pack(side=tk.LEFT, padx=10)
+        ttk.Label(gen_btn_frame, textvariable=status, foreground=colors["gray"]).pack(side=tk.LEFT, padx=10)
 
         bottom_btns = ttk.Frame(win)
         bottom_btns.pack(fill=tk.X, padx=10, pady=(0, 10))
@@ -2477,11 +2668,13 @@ class CharacterApp(tk.Tk):
             messagebox.showinfo("Upgrade Spell", "Select a spell first.")
             return
 
-        win = tk.Toplevel(self)
+        win = tk.Toplevel(self.winfo_toplevel())
         win.title(f"Upgrade Spell: {ab.get('name', 'Unknown')}")
         win.geometry("700x680")
         win.transient(self)
         win.grab_set()
+        colors = self._get_current_colors()
+        style_toplevel(win, colors)
 
         # Status message
         status = tk.StringVar(value="")
@@ -2501,11 +2694,12 @@ class CharacterApp(tk.Tk):
             prompt_frame,
             text="Describe how your character trained to improve this spell:",
             font=("TkDefaultFont", 9, "italic"),
-            foreground="gray"
+            foreground=colors["gray"]
         ).pack(anchor="w", padx=8, pady=(4, 2))
 
         prompt_text = tk.Text(prompt_frame, wrap="word", height=3)
         prompt_text.pack(fill=tk.X, padx=8, pady=(0, 8))
+        style_tk_widget(prompt_text, colors)
         prompt_text.insert("1.0", "Practiced to increase power and efficiency...")
 
         # Generation button
@@ -2522,6 +2716,7 @@ class CharacterApp(tk.Tk):
 
         options_list = tk.Listbox(options_frame, height=5, exportselection=False)
         options_list.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        style_tk_widget(options_list, colors)
 
         # Store generated upgrades
         generated_upgrades = []
@@ -2562,6 +2757,7 @@ class CharacterApp(tk.Tk):
         ttk.Label(edit_frame, text="Description:").grid(row=6, column=0, sticky="nw", padx=6, pady=4)
         notes_box = tk.Text(edit_frame, wrap="word", height=4)
         notes_box.grid(row=6, column=1, sticky="nsew", padx=6, pady=4)
+        style_tk_widget(notes_box, colors)
 
         edit_frame.grid_rowconfigure(6, weight=1)
         edit_frame.grid_columnconfigure(1, weight=1)
@@ -2672,7 +2868,7 @@ class CharacterApp(tk.Tk):
 
         # Buttons
         ttk.Button(gen_btn_frame, text="Generate Upgrades", command=on_generate).pack(side=tk.LEFT, padx=4)
-        ttk.Label(gen_btn_frame, textvariable=status, foreground="gray").pack(side=tk.LEFT, padx=10)
+        ttk.Label(gen_btn_frame, textvariable=status, foreground=colors["gray"]).pack(side=tk.LEFT, padx=10)
 
         bottom_btns = ttk.Frame(win)
         bottom_btns.pack(fill=tk.X, padx=10, pady=(0, 10))
@@ -2689,6 +2885,7 @@ class CharacterApp(tk.Tk):
         ttk.Label(frame, text="Character Notes").pack(anchor="w")
         self.notes_text = tk.Text(frame, wrap="word")
         self.notes_text.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
+        self._tk_widgets.append(self.notes_text)
 
     def _build_world_tab(self):
         frame = ttk.Frame(self.tab_world)
@@ -2697,6 +2894,7 @@ class CharacterApp(tk.Tk):
         ttk.Label(frame, text="Examples: point spending rules, tier changes, combat mechanics, death rules, etc.", foreground="gray").pack(anchor="w", pady=(0, 5))
         self.world_text = tk.Text(frame, wrap="word")
         self.world_text.pack(fill=tk.BOTH, expand=True)
+        self._tk_widgets.append(self.world_text)
 
     # ---------------- Damage Lab ----------------
 
@@ -2739,6 +2937,7 @@ class CharacterApp(tk.Tk):
         self.library_listbox = tk.Listbox(left, height=20, exportselection=False)
         self.library_listbox.pack(fill=tk.BOTH, expand=True)
         self.library_listbox.bind("<<ListboxSelect>>", lambda _: self.library_on_select())
+        self._tk_widgets.append(self.library_listbox)
 
         # Buttons below list
         btn_frame = ttk.Frame(left)
@@ -2796,6 +2995,7 @@ class CharacterApp(tk.Tk):
         ttk.Label(details, text="Description:").grid(row=9, column=0, sticky="nw", padx=6, pady=4)
         self.library_spell_notes = tk.Text(details, wrap="word", height=6, state="disabled")
         self.library_spell_notes.grid(row=9, column=1, sticky="nsew", padx=6, pady=4)
+        self._tk_widgets.append(self.library_spell_notes)
 
         # Import button
         ttk.Button(details, text="Import to Character", command=self.library_import_spell).grid(row=10, column=1, sticky="w", padx=6, pady=(8, 8))
@@ -2907,11 +3107,13 @@ class CharacterApp(tk.Tk):
             return
 
         # Ask which category to import to
-        win = tk.Toplevel(self)
+        win = tk.Toplevel(self.winfo_toplevel())
         win.title("Import Spell")
         win.geometry("300x150")
         win.transient(self)
         win.grab_set()
+        colors = self._get_current_colors()
+        style_toplevel(win, colors)
 
         ttk.Label(win, text=f"Import '{spell.get('name', '')}' to:", font=("TkDefaultFont", 10)).pack(pady=15)
 
@@ -3224,11 +3426,13 @@ class CharacterApp(tk.Tk):
     # ---------------- Spend Points Popup ----------------
 
     def open_spend_points_popup(self):
-        win = tk.Toplevel(self)
+        win = tk.Toplevel(self.winfo_toplevel())
         win.title("Spend Points")
         win.geometry("600x580")
         win.transient(self)
         win.grab_set()
+        colors = self._get_current_colors()
+        style_toplevel(win, colors)
 
         # Current points
         top = ttk.Frame(win)
@@ -3264,6 +3468,7 @@ class CharacterApp(tk.Tk):
 
         # Use listbox
         lb = tk.Listbox(mid, height=18, exportselection=False)
+        style_tk_widget(lb, colors)
         lb.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
         index_to_id = []
@@ -3629,6 +3834,173 @@ class CharacterApp(tk.Tk):
 
 
 
+class CharacterApp(tk.Tk):
+    """Thin window shell that hosts one or more CharacterSheet frames."""
+
+    def __init__(self, initial_paths: list, is_dm: bool = False):
+        super().__init__()
+        self.is_dm = is_dm
+        self.geometry("1150x780")
+        self.sheets: list = []
+
+        # Theme state
+        self.dark_mode = load_theme_pref()
+        self._current_colors = DARK_COLORS if self.dark_mode else LIGHT_COLORS
+        self._style = ttk.Style(self)
+
+        if is_dm:
+            self._build_dm_ui(initial_paths)
+        else:
+            self._build_player_ui(initial_paths[0] if initial_paths else None)
+
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self._update_title()
+
+        # Apply initial theme
+        self._apply_theme()
+
+    # ---- Player mode ----
+
+    def _build_player_ui(self, path: Path):
+        # Theme toggle bar
+        theme_bar = ttk.Frame(self)
+        theme_bar.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(4, 0))
+        self._theme_btn = ttk.Button(theme_bar, text="Dark Mode", command=self._toggle_theme)
+        self._theme_btn.pack(side=tk.RIGHT)
+
+        sheet = CharacterSheet(self, path, is_dm=False)
+        sheet.pack(fill=tk.BOTH, expand=True)
+        self.sheets.append(sheet)
+
+    # ---- DM mode ----
+
+    def _build_dm_ui(self, paths: list):
+        dm_bar = ttk.Frame(self)
+        dm_bar.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(8, 0))
+
+        ttk.Button(dm_bar, text="Open Character...", command=self.dm_open_character).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(dm_bar, text="New Character...", command=self.dm_new_character).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(dm_bar, text="Close Tab", command=self.dm_close_current_tab).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(dm_bar, text="Save All", command=self.dm_save_all).pack(side=tk.RIGHT)
+        self._theme_btn = ttk.Button(dm_bar, text="Dark Mode", command=self._toggle_theme)
+        self._theme_btn.pack(side=tk.RIGHT, padx=(0, 6))
+
+        self.master_notebook = ttk.Notebook(self)
+        self.master_notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(4, 10))
+        self.master_notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+        for path in paths:
+            self._add_character_tab(path)
+
+    def _add_character_tab(self, path: Path):
+        for sheet in self.sheets:
+            if sheet.char_path.resolve() == path.resolve():
+                idx = self.sheets.index(sheet)
+                self.master_notebook.select(idx)
+                return
+
+        sheet = CharacterSheet(self.master_notebook, path, is_dm=True)
+        sheet.apply_theme(self._current_colors)
+        display_name = sheet.get_display_name()
+        self.master_notebook.add(sheet, text=display_name)
+        self.sheets.append(sheet)
+        self.master_notebook.select(sheet)
+        self._update_title()
+
+    def _get_active_sheet(self):
+        if not self.is_dm:
+            return self.sheets[0] if self.sheets else None
+        try:
+            current = self.master_notebook.select()
+            if current:
+                widget = self.nametowidget(current)
+                if isinstance(widget, CharacterSheet):
+                    return widget
+        except Exception:
+            pass
+        return None
+
+    def dm_open_character(self):
+        p = filedialog.askopenfilename(
+            title="Open character JSON",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+        if p:
+            self._add_character_tab(Path(p))
+
+    def dm_new_character(self):
+        p = filedialog.asksaveasfilename(
+            title="Create new character JSON",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+        if p:
+            path = Path(p)
+            save_character(default_character_template(), path)
+            self._add_character_tab(path)
+
+    def dm_close_current_tab(self):
+        sheet = self._get_active_sheet()
+        if sheet is None:
+            return
+        result = sheet.prompt_save_if_dirty()
+        if result in ("cancelled", "save_failed"):
+            return
+        self.master_notebook.forget(sheet)
+        self.sheets.remove(sheet)
+        sheet.destroy()
+        self._update_title()
+
+    def dm_save_all(self):
+        saved = 0
+        for sheet in self.sheets:
+            if sheet._save_to_disk(show_popup=False):
+                saved += 1
+        messagebox.showinfo("Save All", f"Saved {saved} of {len(self.sheets)} character(s).")
+
+    # ---- Shared ----
+
+    def _on_tab_changed(self, event=None):
+        self._update_title()
+
+    def _update_title(self):
+        sheet = self._get_active_sheet()
+        if sheet:
+            name = sheet.get_display_name()
+            if self.is_dm:
+                self.title(f"Homebrew Character Sheet (DM) \u2014 {name}")
+            else:
+                self.title(f"Homebrew Character Sheet \u2014 {name}")
+        else:
+            if self.is_dm:
+                self.title("Homebrew Character Sheet (DM)")
+            else:
+                self.title("Homebrew Character Sheet")
+
+    # ---- Theme ----
+
+    def _toggle_theme(self):
+        self.dark_mode = not self.dark_mode
+        self._current_colors = DARK_COLORS if self.dark_mode else LIGHT_COLORS
+        save_theme_pref(self.dark_mode)
+        self._apply_theme()
+
+    def _apply_theme(self):
+        colors = self._current_colors
+        apply_ttk_theme(self._style, colors)
+        self.configure(bg=colors["bg"])
+        self._theme_btn.configure(text="Light Mode" if self.dark_mode else "Dark Mode")
+        for sheet in self.sheets:
+            sheet.apply_theme(colors)
+
+    def on_close(self):
+        for sheet in list(self.sheets):
+            result = sheet.prompt_save_if_dirty()
+            if result in ("cancelled", "save_failed"):
+                return
+        self.destroy()
+
+
 def dm_login_dialog() -> bool:
     """Show a login dialog. Returns True for DM mode, False for Player mode."""
     result = {"is_dm": False}
@@ -3638,6 +4010,12 @@ def dm_login_dialog() -> bool:
     win.geometry("340x180")
     win.resizable(False, False)
 
+    # Apply theme to login dialog
+    colors = DARK_COLORS if load_theme_pref() else LIGHT_COLORS
+    login_style = ttk.Style(win)
+    apply_ttk_theme(login_style, colors)
+    win.configure(bg=colors["bg"])
+
     ttk.Label(win, text="Enter DM password or continue as Player",
               wraplength=300).pack(padx=20, pady=(18, 8))
 
@@ -3645,7 +4023,7 @@ def dm_login_dialog() -> bool:
     pw_entry = ttk.Entry(win, textvariable=pw_var, show="*", width=30)
     pw_entry.pack(padx=20, pady=(0, 4))
 
-    error_label = ttk.Label(win, text="", foreground="red")
+    error_label = ttk.Label(win, text="", foreground=colors["red"])
     error_label.pack()
 
     btn_frame = ttk.Frame(win)
@@ -3678,8 +4056,11 @@ if __name__ == "__main__":
     is_dm = dm_login_dialog()
 
     path = pick_character_file()
-    if not path:
-        sys.exit(0)
-
-    app = CharacterApp(path, is_dm=is_dm)
+    if is_dm:
+        initial_paths = [path] if path else []
+        app = CharacterApp(initial_paths, is_dm=True)
+    else:
+        if not path:
+            sys.exit(0)
+        app = CharacterApp([path], is_dm=False)
     app.mainloop()
