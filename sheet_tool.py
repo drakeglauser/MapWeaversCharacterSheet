@@ -336,8 +336,8 @@ T1_HP_SOFT_CAP = 100
 T1_HP_GAIN_BEFORE_CAP = 2
 T1_HP_GAIN_AFTER_CAP = 1  # tweak if you want a different post-cap rate
 
-T1_PBD_SOFT_CAP = 15
-T1_PBD_COST_BEFORE_CAP = 3
+T1_PBD_SOFT_CAP = 100
+T1_PBD_COST_BEFORE_CAP = 1
 T1_PBD_GAIN_BEFORE_CAP = 1
 T1_PBD_COST_AFTER_CAP = 5
 T1_PBD_GAIN_AFTER_CAP = 1
@@ -347,8 +347,8 @@ T1_PBD_GAIN_AFTER_CAP = 1
 STAT_ORDER = [
     ("melee_acc",  "Melee Accuracy"),
     ("ranged_acc", "Ranged Weapon Accuracy"),
-    ("precision",  "Precision"),
     ("spellcraft", "Spellcraft"),
+    ("precision",  "Precision"),
 
     ("phys_def",   "Defense"),
     ("evasion",    "Evasion"),
@@ -1845,7 +1845,7 @@ class CharacterSheet(ttk.Frame):
         )
 
         move_box = ttk.LabelFrame(details, text="Transfer")
-        move_box.grid(row=5, column=1, sticky="ew", padx=6, pady=(6, 8))
+        move_box.grid(row=6, column=1, sticky="ew", padx=6, pady=(6, 8))
 
         ttk.Label(move_box, text="Move to:").pack(side=tk.LEFT, padx=(6, 4), pady=6)
 
@@ -1864,7 +1864,7 @@ class CharacterSheet(ttk.Frame):
         ).pack(side=tk.LEFT, padx=(6, 6), pady=6)
 
         json_row = ttk.Frame(details)
-        json_row.grid(row=6, column=1, sticky="w", padx=6, pady=(0, 8))
+        json_row.grid(row=7, column=1, sticky="w", padx=6, pady=(0, 8))
 
         ttk.Button(json_row, text="Copy JSON", command=lambda k=key: self.inv_copy_json_selected(k)).pack(side=tk.LEFT)
         ttk.Button(json_row, text="Import JSON…", command=lambda k=key: self.inv_import_json_dialog(k)).pack(side=tk.LEFT, padx=8)
