@@ -3,7 +3,10 @@
     "allow": [
       "Bash(python sheet_tool.py:*)",
       "Bash(timeout 3 tail:*)",
-      "Bash(timeout 2 tail:*)"
+      "Bash(timeout 2 tail:*)",
+      "Bash(python:*)",
+      "Bash(python -c:*)",
+      "Bash(ls:*)"
     ]
   }
 }

@@ -7,6 +7,16 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
+
+# When running as a frozen PyInstaller GUI app (console=False),
+# stdout/stderr are None which causes print() to crash.
+# Redirect them to devnull to prevent errors and stray console windows.
+if getattr(sys, 'frozen', False):
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, 'w')
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, 'w')
+
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
@@ -336,18 +346,12 @@ T1_HP_SOFT_CAP = 100
 T1_HP_GAIN_BEFORE_CAP = 2
 T1_HP_GAIN_AFTER_CAP = 1  # tweak if you want a different post-cap rate
 
-T1_PBD_SOFT_CAP = 100
-T1_PBD_COST_BEFORE_CAP = 1
-T1_PBD_GAIN_BEFORE_CAP = 1
-T1_PBD_COST_AFTER_CAP = 5
-T1_PBD_GAIN_AFTER_CAP = 1
-
-
 # ---------- New Stats (your list) ----------
 STAT_ORDER = [
     ("melee_acc",  "Melee Accuracy"),
     ("ranged_acc", "Ranged Weapon Accuracy"),
     ("spellcraft", "Spellcraft"),
+    ("pbd",        "PBD"),
     ("precision",  "Precision"),
 
     ("phys_def",   "Defense"),
@@ -402,6 +406,34 @@ def max_pbd_factor_for_die(die_size: int) -> float:
         if d0 <= die_size <= d1:
             t = (die_size - d0) / (d1 - d0)
             return f0 + t * (f1 - f0)
+    return 1.0
+
+
+def hit_roll_multiplier(d20_roll: int) -> float:
+    """
+    Piecewise linear mapping from a d20 roll to an accuracy multiplier:
+      1  -> 0.05
+      2  -> 0.20
+      10 -> 1.00
+      19 -> 2.00
+      20 -> 5.00
+    Linearly interpolates between these anchors.
+    """
+    anchors = [(1, 0.05), (2, 0.20), (10, 1.00), (19, 2.00), (20, 5.00)]
+    try:
+        r = int(d20_roll)
+    except Exception:
+        r = 1
+    r = max(1, min(20, r))
+
+    if r <= anchors[0][0]:
+        return anchors[0][1]
+    if r >= anchors[-1][0]:
+        return anchors[-1][1]
+    for (r0, m0), (r1, m1) in zip(anchors, anchors[1:]):
+        if r0 <= r <= r1:
+            t = (r - r0) / (r1 - r0)
+            return m0 + t * (m1 - m0)
     return 1.0
 
 
@@ -481,7 +513,6 @@ def default_character_template(name="New Hero"):
         "resources": {
             "hp": {"current": 20, "max": 20},
             "mana": {"current": 10, "max": 10},
-            "pbd": 0,
             "mana_density": 0,
             "unspent_points": 0
         },
@@ -504,6 +535,7 @@ def _migrate_stats_schema(char: dict):
     """
     Ensures char["stats"] contains the new stat keys.
     Best-effort mapping from older schemas if they exist.
+    Also migrates PBD from resources into stats (old saves stored it there).
     """
     if not isinstance(char, dict):
         return
@@ -511,7 +543,7 @@ def _migrate_stats_schema(char: dict):
     stats = char.get("stats")
     if not isinstance(stats, dict):
         char["stats"] = {k: 0 for k in STAT_KEYS}
-        return
+        stats = char["stats"]
 
     has_any_new = any(k in stats for k in STAT_KEYS)
 
@@ -533,6 +565,7 @@ def _migrate_stats_schema(char: dict):
         mapped["wis_def"] = _get_int(stats, "wis_def", _get_int(stats, "wis", 0))
 
         char["stats"] = mapped
+        stats = char["stats"]
     else:
         for k in STAT_KEYS:
             if k not in stats:
@@ -541,6 +574,14 @@ def _migrate_stats_schema(char: dict):
                 stats[k] = int(stats[k] or 0)
             except Exception:
                 stats[k] = 0
+
+    # Migrate PBD from resources to stats (old saves stored pbd under resources)
+    res = char.get("resources", {})
+    if "pbd" in res and isinstance(res, dict):
+        old_pbd = _get_int(res, "pbd", 0)
+        if old_pbd > 0 and stats.get("pbd", 0) == 0:
+            stats["pbd"] = old_pbd
+        del res["pbd"]
 
 
 def sort_favorites_first(items):
@@ -1388,7 +1429,6 @@ class CharacterSheet(ttk.Frame):
         self.var_hp_max = tk.StringVar()
         self.var_mana_current = tk.StringVar()
         self.var_mana_max = tk.StringVar()
-        self.var_pbd = tk.StringVar()
         self.var_mana_density = tk.StringVar()
         self.var_mana_density_mult = tk.StringVar()
         self.var_unspent = tk.StringVar()
@@ -1456,6 +1496,7 @@ class CharacterSheet(ttk.Frame):
 
         self.var_combat_roll_type = tk.StringVar(value="")
         self.var_combat_damage_expr = tk.StringVar(value="")
+        self.var_combat_hit_roll = tk.StringVar()
         self.var_combat_roll_value = tk.StringVar()
         self.var_combat_mana_spend = tk.StringVar()
         self.var_combat_result = tk.StringVar(value="")
@@ -1573,18 +1614,15 @@ class CharacterSheet(ttk.Frame):
         ttk.Entry(res_frame, textvariable=self.var_mana_density, width=6).grid(row=8, column=1)
         ttk.Label(res_frame, textvariable=self.var_mana_density_mult, foreground="gray").grid(row=8, column=3, sticky="w", padx=4)
 
-        ttk.Label(res_frame, text="PBD:").grid(row=9, column=0, sticky="w", padx=4, pady=3)
-        ttk.Entry(res_frame, textvariable=self.var_pbd, width=6).grid(row=9, column=1)
-
-        ttk.Label(res_frame, text="Unspent pts:").grid(row=10, column=0, sticky="w", padx=4, pady=3)
-        ttk.Entry(res_frame, textvariable=self.var_unspent, width=6).grid(row=10, column=1)
+        ttk.Label(res_frame, text="Unspent pts:").grid(row=9, column=0, sticky="w", padx=4, pady=3)
+        ttk.Entry(res_frame, textvariable=self.var_unspent, width=6).grid(row=9, column=1)
 
         ttk.Button(res_frame, text="Spend Points…", command=self.open_spend_points_popup).grid(
-            row=11, column=0, columnspan=4, sticky="ew", padx=4, pady=(8, 4)
+            row=10, column=0, columnspan=4, sticky="ew", padx=4, pady=(8, 4)
         )
 
         ttk.Button(res_frame, text="Long Rest (full HP/Mana)", command=self.apply_long_rest).grid(
-            row=12, column=0, columnspan=4, sticky="ew", padx=4, pady=(6, 4)
+            row=11, column=0, columnspan=4, sticky="ew", padx=4, pady=(6, 4)
         )
 
         # Combat quick use
@@ -1612,19 +1650,25 @@ class CharacterSheet(ttk.Frame):
         ttk.Label(c_right, text="Damage dice:").grid(row=1, column=0, sticky="w", padx=4, pady=2)
         ttk.Label(c_right, textvariable=self.var_combat_damage_expr).grid(row=1, column=1, sticky="w", padx=4, pady=2)
 
-        ttk.Label(c_right, text="Enter rolled damage:").grid(row=2, column=0, sticky="w", padx=4, pady=(10, 2))
-        ttk.Entry(c_right, textvariable=self.var_combat_roll_value, width=10).grid(row=2, column=1, sticky="w", padx=4, pady=(10, 2))
+        ttk.Label(c_right, text="Hit roll (d20):").grid(row=2, column=0, sticky="w", padx=4, pady=(10, 2))
+        hit_row = ttk.Frame(c_right)
+        hit_row.grid(row=2, column=1, sticky="w", padx=4, pady=(10, 2))
+        ttk.Entry(hit_row, textvariable=self.var_combat_hit_roll, width=10).pack(side=tk.LEFT)
+        ttk.Button(hit_row, text="Check Accuracy", command=self.check_accuracy).pack(side=tk.LEFT, padx=(6, 0))
 
-        ttk.Label(c_right, text="Mana to spend (abilities):").grid(row=3, column=0, sticky="w", padx=4, pady=2)
+        ttk.Label(c_right, text="Enter rolled damage:").grid(row=3, column=0, sticky="w", padx=4, pady=(10, 2))
+        ttk.Entry(c_right, textvariable=self.var_combat_roll_value, width=10).grid(row=3, column=1, sticky="w", padx=4, pady=(10, 2))
+
+        ttk.Label(c_right, text="Mana to spend (abilities):").grid(row=4, column=0, sticky="w", padx=4, pady=2)
         self.combat_mana_entry = ttk.Entry(c_right, textvariable=self.var_combat_mana_spend, width=10)
-        self.combat_mana_entry.grid(row=3, column=1, sticky="w", padx=4, pady=2)
+        self.combat_mana_entry.grid(row=4, column=1, sticky="w", padx=4, pady=2)
 
         ttk.Button(c_right, text="Use / Cast", command=self.use_combat_action).grid(
-            row=4, column=0, columnspan=2, sticky="ew", padx=4, pady=(12, 6)
+            row=5, column=0, columnspan=2, sticky="ew", padx=4, pady=(12, 6)
         )
 
         ttk.Label(c_right, textvariable=self.var_combat_result, foreground="gray").grid(
-            row=5, column=0, columnspan=2, sticky="w", padx=4, pady=(2, 2)
+            row=6, column=0, columnspan=2, sticky="w", padx=4, pady=(2, 2)
         )
 
         for col in range(2):
@@ -1762,6 +1806,21 @@ class CharacterSheet(ttk.Frame):
         # Also theme the damage lab
         if hasattr(self, "damage_lab"):
             self.damage_lab.apply_theme(colors)
+        # Re-color stat calculations markdown tags
+        if hasattr(self, "stat_calc_text"):
+            tw = self.stat_calc_text
+            fg = colors["entry_fg"]
+            code_bg = "#3c3c3c" if colors is DARK_COLORS else "#f0f0f0"
+            accent = colors["accent"]
+            tw.tag_configure("h1", foreground=accent)
+            tw.tag_configure("h2", foreground=accent)
+            tw.tag_configure("h3", foreground=accent)
+            tw.tag_configure("body", foreground=fg)
+            tw.tag_configure("bold", foreground=fg)
+            tw.tag_configure("code_inline", foreground=fg, background=code_bg)
+            tw.tag_configure("code_block", foreground=fg, background=code_bg)
+            tw.tag_configure("table", foreground=fg)
+            tw.tag_configure("bullet", foreground=fg)
 
     def _get_current_colors(self):
         """Get the current theme colors from the app."""
@@ -2888,13 +2947,94 @@ class CharacterSheet(ttk.Frame):
         self._tk_widgets.append(self.notes_text)
 
     def _build_world_tab(self):
-        frame = ttk.Frame(self.tab_world)
-        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        ttk.Label(frame, text="World & Campaign Rules (DM-provided)", font=("Segoe UI", 10, "bold")).pack(anchor="w")
-        ttk.Label(frame, text="Examples: point spending rules, tier changes, combat mechanics, death rules, etc.", foreground="gray").pack(anchor="w", pady=(0, 5))
-        self.world_text = tk.Text(frame, wrap="word")
-        self.world_text.pack(fill=tk.BOTH, expand=True)
+        world_nb = ttk.Notebook(self.tab_world)
+        world_nb.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        # --- Sub-tab 1: World Notes (editable) ---
+        notes_frame = ttk.Frame(world_nb)
+        world_nb.add(notes_frame, text="World Notes")
+
+        ttk.Label(notes_frame, text="World & Campaign Rules (DM-provided)", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=10, pady=(10, 0))
+        ttk.Label(notes_frame, text="Examples: point spending rules, tier changes, combat mechanics, death rules, etc.", foreground="gray").pack(anchor="w", padx=10, pady=(0, 5))
+        self.world_text = tk.Text(notes_frame, wrap="word")
+        self.world_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
         self._tk_widgets.append(self.world_text)
+
+        # --- Sub-tab 2: Stat Calculations (read-only, from StatCalculations.md) ---
+        calc_frame = ttk.Frame(world_nb)
+        world_nb.add(calc_frame, text="Stat Calculations")
+
+        calc_inner = ttk.Frame(calc_frame)
+        calc_inner.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        self.stat_calc_text = tk.Text(calc_inner, wrap="word", state="disabled", cursor="arrow")
+        calc_scroll = ttk.Scrollbar(calc_inner, orient="vertical", command=self.stat_calc_text.yview)
+        self.stat_calc_text.configure(yscrollcommand=calc_scroll.set)
+        calc_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.stat_calc_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._tk_widgets.append(self.stat_calc_text)
+
+        self._load_stat_calculations()
+
+    def _load_stat_calculations(self):
+        """Load StatCalculations.md and render it with basic formatting."""
+        md_path = Path(__file__).parent / "StatCalculations.md"
+        try:
+            content = md_path.read_text(encoding="utf-8")
+        except Exception:
+            content = "(Could not load StatCalculations.md)"
+
+        tw = self.stat_calc_text
+        tw.configure(state="normal")
+        tw.delete("1.0", tk.END)
+
+        # Configure tags
+        tw.tag_configure("h1", font=("Segoe UI", 16, "bold"), spacing1=4, spacing3=6)
+        tw.tag_configure("h2", font=("Segoe UI", 13, "bold"), spacing1=12, spacing3=4)
+        tw.tag_configure("h3", font=("Segoe UI", 11, "bold"), spacing1=10, spacing3=2)
+        tw.tag_configure("body", font=("Segoe UI", 10))
+        tw.tag_configure("bold", font=("Segoe UI", 10, "bold"))
+        tw.tag_configure("code_inline", font=("Consolas", 10))
+        tw.tag_configure("code_block", font=("Consolas", 9), lmargin1=20, lmargin2=20)
+        tw.tag_configure("table", font=("Consolas", 9), lmargin1=10, lmargin2=10)
+        tw.tag_configure("hr", font=("Segoe UI", 1), foreground="gray", spacing1=6, spacing3=6)
+        tw.tag_configure("bullet", font=("Segoe UI", 10), lmargin1=20, lmargin2=30)
+
+        in_code = False
+        for line in content.split("\n"):
+            if line.startswith("```"):
+                in_code = not in_code
+                continue
+            if in_code:
+                tw.insert(tk.END, line + "\n", "code_block")
+            elif line.startswith("# ") and not line.startswith("##"):
+                self._insert_md_formatted(tw, line[2:], "h1")
+            elif line.startswith("### "):
+                self._insert_md_formatted(tw, line[4:], "h3")
+            elif line.startswith("## "):
+                self._insert_md_formatted(tw, line[3:], "h2")
+            elif line.strip().startswith("---"):
+                tw.insert(tk.END, "\u2500" * 60 + "\n", "hr")
+            elif line.startswith("|"):
+                tw.insert(tk.END, line + "\n", "table")
+            elif line.startswith("- "):
+                self._insert_md_formatted(tw, "\u2022 " + line[2:], "bullet")
+            else:
+                self._insert_md_formatted(tw, line, "body")
+
+        tw.configure(state="disabled")
+
+    def _insert_md_formatted(self, tw, text, base_tag):
+        """Insert a line with inline **bold** and `code` rendered."""
+        parts = re.split(r'(\*\*.*?\*\*|`[^`]+`)', text)
+        for part in parts:
+            if part.startswith("**") and part.endswith("**"):
+                tw.insert(tk.END, part[2:-2], "bold")
+            elif part.startswith("`") and part.endswith("`"):
+                tw.insert(tk.END, part[1:-1], "code_inline")
+            else:
+                tw.insert(tk.END, part, base_tag)
+        tw.insert(tk.END, "\n")
 
     # ---------------- Damage Lab ----------------
 
@@ -2904,6 +3044,7 @@ class CharacterSheet(ttk.Frame):
             get_actions=self._damage_lab_get_actions,
             get_pbd=self._damage_lab_get_pbd,
             get_mana_density=self._damage_lab_get_mana_density,
+            get_precision=self._damage_lab_get_precision,
         )
         self.damage_lab.pack(fill=tk.BOTH, expand=True)
 
@@ -2913,8 +3054,14 @@ class CharacterSheet(ttk.Frame):
 
     def _damage_lab_get_pbd(self):
         try:
-            return int(self.var_pbd.get().strip())
-        except ValueError:
+            return int(self.var_stats["pbd"].get().strip() or "0")
+        except (ValueError, KeyError):
+            return 0
+
+    def _damage_lab_get_precision(self):
+        try:
+            return int(self.var_stats["precision"].get().strip() or "0")
+        except (ValueError, KeyError):
             return 0
 
     def _damage_lab_get_mana_density(self):
@@ -3210,6 +3357,53 @@ class CharacterSheet(ttk.Frame):
         self.var_combat_result.set("")
         self.var_combat_roll_value.set("")
 
+    def check_accuracy(self):
+        """Calculate and display effective accuracy without rolling damage."""
+        if self.combat_selected_ref is None:
+            messagebox.showinfo("Combat", "Select an item or ability first.")
+            return
+
+        chosen = None
+        for a in self.combat_actions:
+            if a["ref"] is self.combat_selected_ref and a["kind"] == self.combat_selected_kind:
+                chosen = a
+                break
+        if chosen is None:
+            messagebox.showinfo("Combat", "Selection is out of date. Hit Refresh list and re-select.")
+            return
+
+        hit_roll_str = self.var_combat_hit_roll.get().strip()
+        if not hit_roll_str:
+            messagebox.showwarning("Combat", "Enter a d20 roll value first.")
+            return
+
+        try:
+            d20 = int(hit_roll_str)
+        except ValueError:
+            messagebox.showwarning("Combat", "Hit roll must be a number (1–20).")
+            return
+        d20 = max(1, min(20, d20))
+
+        ref = chosen["ref"]
+        if chosen["kind"] == "ability":
+            acc_key, acc_label = "spellcraft", "Spellcraft"
+        elif bool(ref.get("is_ranged", False)):
+            acc_key, acc_label = "ranged_acc", "Ranged Acc"
+        else:
+            acc_key, acc_label = "melee_acc", "Melee Acc"
+
+        try:
+            acc_val = int(self.var_stats[acc_key].get().strip() or "0")
+        except Exception:
+            acc_val = 0
+
+        roll_mult = hit_roll_multiplier(d20)
+        effective_acc = acc_val * roll_mult
+
+        self.var_combat_result.set(
+            f"Accuracy: {effective_acc:.1f} ({acc_label} {acc_val} x{roll_mult:.2f}, d20={d20})"
+        )
+
     def use_combat_action(self):
         if self.combat_selected_ref is None:
             messagebox.showinfo("Combat", "Select an item or ability first.")
@@ -3226,6 +3420,39 @@ class CharacterSheet(ttk.Frame):
 
         ref = chosen["ref"]
 
+        # -------- Accuracy calculation --------
+        hit_roll_str = self.var_combat_hit_roll.get().strip()
+        hit_info = ""
+
+        if hit_roll_str:
+            try:
+                d20 = int(hit_roll_str)
+            except ValueError:
+                messagebox.showwarning("Combat", "Hit roll must be a number (1–20).")
+                return
+            d20 = max(1, min(20, d20))
+
+            # Determine which accuracy stat to use
+            if chosen["kind"] == "ability":
+                acc_key, acc_label = "spellcraft", "Spellcraft"
+            elif bool(ref.get("is_ranged", False)):
+                acc_key, acc_label = "ranged_acc", "Ranged Acc"
+            else:
+                acc_key, acc_label = "melee_acc", "Melee Acc"
+
+            try:
+                acc_val = int(self.var_stats[acc_key].get().strip() or "0")
+            except Exception:
+                acc_val = 0
+
+            roll_mult = hit_roll_multiplier(d20)
+            effective_acc = acc_val * roll_mult
+
+            hit_info = (
+                f"Accuracy: {effective_acc:.1f} ({acc_label} {acc_val} x{roll_mult:.2f}, d20={d20}) | "
+            )
+
+        # -------- Damage calculation --------
         try:
             rolled = int(self.var_combat_roll_value.get().strip())
         except ValueError:
@@ -3241,41 +3468,33 @@ class CharacterSheet(ttk.Frame):
 
         base = rolled + flat_bonus
 
-        # -------- Items: apply PBD (melee) or Precision (ranged) --------
+        # -------- Items: apply PBD (melee) or Precision (ranged) as multiplier --------
         if chosen["kind"] == "item":
             apply_bonus = bool(ref.get("apply_bonus", ref.get("apply_pbd", True)))
             is_ranged = bool(ref.get("is_ranged", False))
 
             if not apply_bonus:
-                self.var_combat_result.set(f"Item: base {base} (rolled {rolled} + flat {flat_bonus}) → Total {base} (no bonus)")
+                self.var_combat_result.set(f"{hit_info}Item: base {base} (rolled {rolled} + flat {flat_bonus}) → Total {base} (no bonus)")
                 return
 
-            max_roll = max(1, dice_count * die_size)
-            pct = clamp(rolled / max_roll, 0.0, 1.0)
-            max_factor = max_pbd_factor_for_die(die_size)
-
             if is_ranged:
-                # Precision bonus for ranged
                 try:
-                    precision = int(self.var_stats["precision"].get().strip() or "0")
+                    pts = int(self.var_stats["precision"].get().strip() or "0")
                 except Exception:
-                    precision = 0
-                add = int(precision * pct * max_factor)
+                    pts = 0
                 label = "Precision"
             else:
-                # PBD bonus for melee
                 try:
-                    pbd = int(self.var_pbd.get().strip() or "0")
+                    pts = int(self.var_stats["pbd"].get().strip() or "0")
                 except Exception:
-                    pbd = 0
-                add = int(pbd * pct * max_factor)
+                    pts = 0
                 label = "PBD"
 
-            total = base + add
-            pct_display = int(round(pct * 100))
+            mult = mana_density_multiplier(pts)
+            total = int(math.floor(base * mult))
             self.var_combat_result.set(
-                f"Item: base {base} (rolled {rolled} + flat {flat_bonus}) "
-                f"+ {label} add {add} ({pct_display}% of max {max_roll}, die d{die_size}, factor {max_factor:.2f}) "
+                f"{hit_info}Item: base {base} (rolled {rolled} + flat {flat_bonus}) "
+                f"* {label} x{mult:.2f} ({pts} pts) "
                 f"→ Total {total}"
             )
             return
@@ -3325,7 +3544,7 @@ class CharacterSheet(ttk.Frame):
 
         ratio = spent_eff / base_eff if base_eff > 0 else 1.0
         self.var_combat_result.set(
-            f"{slot.title()} ability: base {base} (rolled {rolled} + flat {flat_bonus}), "
+            f"{hit_info}{slot.title()} ability: base {base} (rolled {rolled} + flat {flat_bonus}), "
             f"overcast +{over_bonus} (spent {spent_eff}/{base_eff}={ratio:.2f}x), "
             f"*{dmg_mult:.2f} slot *{md_mult:.2f} mana density → {total}. Mana spent: {spent_eff}."
         )
@@ -3459,7 +3678,6 @@ class CharacterSheet(ttk.Frame):
         targets = [
             ("HP (Tier 1 rule)", "hp"),
             ("Mana (Tier 1 rule)", "mana"),
-            ("PBD (Tier 1 rule)", "pbd"),
             ("Mana Density (+1 per point)", "mana_density"),
             ("", "sep"),
         ]
@@ -3617,25 +3835,6 @@ class CharacterSheet(ttk.Frame):
             self.var_mana_current.set(str(cur))
             return spent, f"Mana +{gained} (max/current)."
 
-        # PBD: cost varies by current PBD
-        if target_id == "pbd":
-            pbd = to_int(self.var_pbd.get(), 0)
-            gained = 0
-            while True:
-                if pbd < T1_PBD_SOFT_CAP:
-                    cost, gain = (T1_PBD_COST_BEFORE_CAP, T1_PBD_GAIN_BEFORE_CAP)
-                else:
-                    cost, gain = (T1_PBD_COST_AFTER_CAP, T1_PBD_GAIN_AFTER_CAP)
-
-                if spent + cost > budget:
-                    break
-
-                spent += cost
-                pbd += gain
-                gained += gain
-            self.var_pbd.set(str(pbd))
-            return spent, f"PBD +{gained}."
-
         # Mana density: 1 point each => +1
         if target_id == "mana_density":
             md = to_int(self.var_mana_density.get(), 0)
@@ -3673,7 +3872,6 @@ class CharacterSheet(ttk.Frame):
         self.var_hp_max.set(str(hp.get("max", 0)))
         self.var_mana_current.set(str(mana.get("current", 0)))
         self.var_mana_max.set(str(mana.get("max", 0)))
-        self.var_pbd.set(str(res.get("pbd", 0)))
         self.var_mana_density.set(str(res.get("mana_density", 0)))
         self._refresh_mana_density_display()
         self.var_unspent.set(str(res.get("unspent_points", 0)))
@@ -3769,7 +3967,6 @@ class CharacterSheet(ttk.Frame):
         except ValueError:
             res["mana_density"] = 0
 
-        res["pbd"] = to_int_var(self.var_pbd)
         res["unspent_points"] = to_int_var(self.var_unspent)
 
         stats = c.setdefault("stats", {})

@@ -13,7 +13,8 @@ All base stats cost **1 point per +1**. There are no soft caps on base stats.
 | **Melee Accuracy** | Accuracy for melee attack rolls |
 | **Ranged Accuracy** | Accuracy for ranged weapon attack rolls |
 | **Spellcraft** | Accuracy for spell attack rolls |
-| **Precision** | Bonus damage for ranged weapons (same role as PBD for melee) |
+| **PBD** | Power-Based Damage — multiplier for melee weapon damage (scales like Mana Density) |
+| **Precision** | Multiplier for ranged weapon damage (scales like Mana Density) |
 | **Physical Defense** | Provides flat damage reduction (DR) against incoming hits |
 | **Evasion** | Ability to dodge or avoid attacks |
 | **Wisdom** | Wisdom-based defense |
@@ -42,17 +43,6 @@ The soft cap at **100 HP** means it takes twice as many points to increase HP on
 | At or above 50 max Mana | 3 points | +2 Mana |
 
 After 50 max mana, progression slows — you pay 3 points for every 2 mana gained.
-
-### PBD (Power-Based Damage)
-
-PBD is the melee damage bonus added to weapon attacks.
-
-| Range | Cost | Gain |
-|-------|------|------|
-| Below 100 PBD | 1 point | +1 PBD |
-| At or above 100 PBD | 5 points | +1 PBD |
-
-After the soft cap of **100**, PBD becomes expensive at 5 points per +1.
 
 ### Mana Density
 
@@ -92,6 +82,61 @@ Final Damage = max(0, Incoming Damage - DR)
 
 ---
 
+## Accuracy & Evasion (Hit Check)
+
+Before dealing damage, an attack must **hit**. The attacker rolls a **d20**, which produces a multiplier on their accuracy stat. The resulting **Effective Accuracy** is displayed and compared by hand against the target's **Evasion** stat.
+
+### Which Accuracy Stat?
+
+| Attack Type | Accuracy Stat Used |
+|-------------|-------------------|
+| Melee weapon (not ranged) | **Melee Accuracy** |
+| Ranged weapon (is_ranged) | **Ranged Accuracy** |
+| Ability / Spell | **Spellcraft** |
+
+### d20 Roll Multiplier
+
+The d20 roll maps to a multiplier via piecewise linear interpolation:
+
+| d20 Roll | Multiplier | Effect |
+|----------|------------|--------|
+| 1 | x0.05 | Near-guaranteed miss |
+| 2 | x0.20 | Very weak |
+| 5 | x0.50 | Half effectiveness |
+| 10 | x1.00 | Baseline |
+| 15 | x1.56 | Above average |
+| 19 | x2.00 | Strong hit |
+| 20 | x5.00 | Devastating hit |
+
+Values between anchors (1, 2, 10, 19, 20) are linearly interpolated.
+
+### Accuracy Formula
+
+```
+Effective Accuracy = Accuracy Stat * Roll Multiplier(d20)
+```
+
+Compare the result against the target's Evasion stat:
+- If Effective Accuracy >= Enemy Evasion → **HIT** (proceed to damage)
+- If Effective Accuracy < Enemy Evasion → **MISS** (no damage)
+
+**Example:** Melee Accuracy 40, rolled a 15 on d20
+- Roll multiplier for 15 = ~1.56x (interpolated between 10→1.0 and 19→2.0)
+- Effective Accuracy = 40 * 1.56 = **62.4**
+- Compare 62.4 against the target's Evasion to determine hit/miss
+
+**Example:** Ranged Accuracy 30, rolled a 4 on d20
+- Roll multiplier for 4 = ~0.45x (interpolated between 2→0.20 and 10→1.00)
+- Effective Accuracy = 30 * 0.45 = **13.4**
+- Compare 13.4 against the target's Evasion to determine hit/miss
+
+### Notes
+
+- The hit roll (d20) field is **optional** in the Combat Quick Use panel. If left blank, damage is calculated without an accuracy check.
+- Evasion acts as the target's "armor class" — the threshold that must be met or exceeded. This comparison is done manually by the DM.
+
+---
+
 ## Weapon Damage (Items)
 
 ### Dice Notation
@@ -105,43 +150,38 @@ Damage is written in standard dice notation: `NdS+F`
 
 ### Melee Weapons (PBD Scaling)
 
-When an item has "Apply Bonus" enabled and is **not** ranged:
+When an item has "Apply Bonus" enabled and is **not** ranged, the base damage is multiplied by the PBD multiplier. PBD uses the same scaling formula as Mana Density:
 
 ```
 Base Damage     = Dice Roll + Flat Bonus
-Roll Percentage = Dice Roll / Max Possible Roll    (clamped 0–100%)
-PBD Bonus       = floor(PBD * Roll Percentage * Die Factor)
-Total Damage    = Base Damage + PBD Bonus
+PBD Multiplier  = scaling_multiplier(PBD points)
+Total Damage    = floor(Base Damage * PBD Multiplier)
 ```
 
-The **Die Factor** scales PBD contribution based on the die size used:
+| PBD Points | Multiplier |
+|------------|------------|
+| 0 | 1.00x |
+| 25 | 1.25x |
+| 50 | 1.50x |
+| 100 | 2.00x |
+| 10,000 | 3.00x |
 
-| Die Size | Factor | Effect |
-|----------|--------|--------|
-| d4 | 0.50 | PBD adds up to 50% of its value |
-| d6 | ~0.67 | |
-| d8 | ~0.83 | |
-| d10 | 1.00 | PBD adds up to 100% of its value |
-| d12 | ~1.56 | |
-| d20 | ~2.11 | PBD adds up to 211% of its value |
-
-Values between these are linearly interpolated.
+**Formula:**
+- **0–100 points:** `multiplier = 1.0 + (points / 100)` — linear scaling from 1.0x to 2.0x
+- **Above 100 points:** `multiplier = 2.0 + log(points / 100) / log(100)` — logarithmic scaling with heavy diminishing returns
 
 **Example:** 2d8+2 weapon, rolled 10, PBD is 50
 - Base = 10 + 2 = 12
-- Max roll = 2 * 8 = 16
-- Roll % = 10 / 16 = 62.5%
-- Die factor for d8 = ~0.83
-- PBD Bonus = floor(50 * 0.625 * 0.83) = floor(25.9) = **25**
-- **Total = 12 + 25 = 37**
+- PBD multiplier = 1.0 + (50 / 100) = 1.50x
+- **Total = floor(12 * 1.50) = 18**
 
 ### Ranged Weapons (Precision Scaling)
 
-When an item has "Apply Bonus" enabled and **is** ranged, it uses **Precision** instead of PBD, but the formula is identical:
+When an item has "Apply Bonus" enabled and **is** ranged, it uses **Precision** instead of PBD, with the same multiplier formula:
 
 ```
-Precision Bonus = floor(Precision * Roll Percentage * Die Factor)
-Total Damage    = Base Damage + Precision Bonus
+Precision Multiplier = scaling_multiplier(Precision points)
+Total Damage         = floor(Base Damage * Precision Multiplier)
 ```
 
 ### No Bonus
@@ -282,12 +322,12 @@ The mana cost is derived from the average damage of the roll, modified by the sl
 
 ### Weapon Attack
 ```
-Roll Dice → Add Flat Bonus → Add PBD/Precision Scaling → Final Damage
+Hit Check (d20 * Accuracy vs Evasion) → Roll Dice → Add Flat Bonus → Apply PBD/Precision Multiplier → Final Damage
 ```
 
 ### Ability Cast
 ```
-Roll Dice → Add Flat Bonus → Add Overcast Bonus → Apply Slot Multiplier → Apply Mana Density Multiplier → Final Damage
+Hit Check (d20 * Spellcraft vs Evasion) → Roll Dice → Add Flat Bonus → Add Overcast Bonus → Apply Slot Multiplier → Apply Mana Density Multiplier → Final Damage
 ```
 
 ### Incoming Hit

@@ -35,9 +35,9 @@ Minimum tests to include (as applicable):
   - 0..4 => DR 0
   - 5..9 => DR 1
   - 10..14 => DR 2
-- PBD / Precision add:
-  - higher roll => higher add (monotonic with pct)
-  - clamp behavior at min/max rolls
+- PBD / Precision multiplier:
+  - Same formula as Mana Density (1.0 + pts/100 up to 100, then log)
+  - Both are regular stats (1 point per +1, no soft caps)
 
 Preferred test style:
 - Use Python’s built-in unittest unless the user explicitly wants pytest.
@@ -73,7 +73,7 @@ Before providing code changes:
 ## “Ask first” list
 These require explicit confirmation before implementation:
 - Any change to combat resolution rules (hit chance, crit rules, action economy)
-- Any change to scaling formulas (mana density, overcast, PBD factors)
+- Any change to scaling formulas (mana density, overcast, PBD/Precision multipliers)
 - Any new stat meaning or new stat added/removed
 - Any new file format or export/import behavior beyond simple JSON copy/paste
 

@@ -114,12 +114,14 @@ class DamageLabTab(ttk.Frame):
       get_actions(): returns list of dicts like your combat_actions
          each action dict must include: kind ('item' or 'ability'), ref (dict), display, slot (for abilities)
       get_pbd(): returns current PBD int from app
+      get_precision(): returns current Precision int from app
     """
-    def __init__(self, parent, get_actions, get_pbd, get_mana_density):
+    def __init__(self, parent, get_actions, get_pbd, get_mana_density, get_precision=None):
         super().__init__(parent)
         self.get_actions = get_actions
         self.get_pbd = get_pbd
         self.get_mana_density = get_mana_density
+        self.get_precision = get_precision or (lambda: 0)
 
         self.actions = []
         self.selected_ref = None
@@ -200,7 +202,7 @@ class DamageLabTab(ttk.Frame):
         ttk.Label(controls, text="Mana spend (abilities):").grid(row=2, column=2, sticky="w", padx=6, pady=4)
         ttk.Entry(controls, textvariable=self.var_mana_spend, width=10).grid(row=2, column=3, sticky="w", padx=6, pady=4)
 
-        ttk.Label(controls, text="PBD override (blank=use sheet):").grid(row=3, column=0, sticky="w", padx=6, pady=4)
+        ttk.Label(controls, text="PBD/Precision override (blank=use sheet):").grid(row=3, column=0, sticky="w", padx=6, pady=4)
         ttk.Entry(controls, textvariable=self.var_pbd_override, width=10).grid(row=3, column=1, sticky="w", padx=6, pady=4)
 
         # Mana plot extras
@@ -300,6 +302,15 @@ class DamageLabTab(ttk.Frame):
                 return self.get_pbd()
         return self.get_pbd()
 
+    def _get_precision_value(self) -> int:
+        s = self.var_pbd_override.get().strip()
+        if s:
+            try:
+                return int(s)
+            except ValueError:
+                return self.get_precision()
+        return self.get_precision()
+
     def _compute_damage(self, rolled_total: int, mana_spend_base: int) -> int:
         """Returns final damage after modifiers."""
         if self.selected_ref is None:
@@ -315,16 +326,14 @@ class DamageLabTab(ttk.Frame):
 
         base = int(rolled_total) + int(flat_bonus)
 
-        # Items: apply PBD scaling (if apply_pbd true)
+        # Items: apply PBD/Precision as multiplier (same formula as mana density)
         if self.selected_kind == "item":
             total = base
-            if bool(ref.get("apply_pbd", True)):
-                pbd = self._get_pbd_value()
-                max_roll = max(1, dice_count * die_size)
-                pct = clamp(rolled_total / max_roll, 0.0, 1.0)
-                max_factor = max_pbd_factor_for_die(die_size)
-                pbd_add = int(pbd * pct * max_factor)
-                total += pbd_add
+            if bool(ref.get("apply_bonus", ref.get("apply_pbd", True))):
+                is_ranged = bool(ref.get("is_ranged", False))
+                pts = self._get_precision_value() if is_ranged else self._get_pbd_value()
+                mult = mana_density_multiplier(pts)
+                total = int(math.floor(base * mult))
         else:
             # Abilities: NO PBD. Apply slot multipliers + overcast
             slot = self.selected_slot or "inner"

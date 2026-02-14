@@ -25,13 +25,14 @@ Goals of the system
 - For purely “mental” spells, oppose with Wis.
 - For physical spell projectiles / beams, oppose with Evasion (or Evasion + Wis in special cases).
 
-### “Precision / PBD-style” Scaling
-4) Precision (Ranged PBD)
-- Only applies to ranged weapons that should scale like PBD.
-- Think of it like “ranged PBD”, where higher rolled damage increases the bonus added from Precision.
-
-5) PBD (Melee PBD)
+### "Precision / PBD-style" Scaling
+4) PBD (Melee damage multiplier)
 - Only applies to melee weapons/items that are tagged to use it.
+- Works as a damage multiplier using the same formula as Mana Density.
+
+5) Precision (Ranged damage multiplier)
+- Only applies to ranged weapons that should scale like PBD.
+- Works as a damage multiplier using the same formula as Mana Density.
 
 ### Defensive Stats
 6) Physical Defense (Flat Damage Reduction)
@@ -70,7 +71,7 @@ Goals of the system
 - HP: hit points
 - Mana: mana pool
 - Mana Density: multiplier that increases spell damage scaling (and possibly other mana-related effects)
-- PBD: melee scaling stat for weapons tagged as apply_pbd
+- PBD: now a regular stat (not a resource); melee damage multiplier for weapons tagged as apply_bonus
 
 Mana Density Multiplier (current design intent)
 - 0 points => 1.00x
@@ -113,7 +114,7 @@ Notes:
 ### C) Damage pipeline (conceptual)
 1) Roll base damage from the item/spell dice
 2) Add flat bonus from the damage expression (e.g., +3)
-3) Apply PBD/Precision add (if applicable)
+3) Apply PBD/Precision multiplier (if applicable)
 4) Apply hit quality multiplier (0.1x–2.5x) (if you’re using it)
 5) Apply resist/weak/vuln multipliers (if used)
 6) Apply Physical Defense DR (flat reduction) if the damage is physical
@@ -122,20 +123,16 @@ Notes:
 ---
 
 ## PBD vs Precision (how they should behave)
-- Melee weapons: if apply_pbd = true, use PBD.
-- Ranged weapons: if you want “ranged PBD”, use Precision instead.
+- Melee weapons: if apply_bonus = true and not ranged, use PBD multiplier.
+- Ranged weapons: if apply_bonus = true and is_ranged, use Precision multiplier.
+- Both are now regular stats (1 point per +1, no soft caps).
 
-Design target:
-- Bonus is stronger when the player rolls high on the damage dice.
-- Bonus is weaker when the player rolls low.
+Both use the same multiplier formula as Mana Density:
+- 0–100 points: `multiplier = 1.0 + (points / 100)` (linear 1.0x to 2.0x)
+- Above 100: `multiplier = 2.0 + log(points / 100) / log(100)` (logarithmic)
 
-Simple definition:
-- pct = rolled_damage_dice_sum / max_possible_dice_sum (clamped 0..1)
-- add = floor(ScalingStat * pct * DieFactor)
-
-Where:
-- ScalingStat is PBD (melee) or Precision (ranged)
-- DieFactor is a die-size-based factor (d4 lower, d20 higher)
+Formula:
+- Total Damage = floor(Base Damage * Multiplier)
 
 ---
 
@@ -208,6 +205,6 @@ Cross-tier intention:
 - Mana Density multiplier design intent
 - Physical Defense being flat DR (not % reduction)
 - Agility granting extra attacks (not accuracy)
-- PBD/Precision being “roll-high -> higher bonus” scaling
+- PBD/Precision being multiplier-based scaling (same formula as Mana Density)
 
 End of document.
