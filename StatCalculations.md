@@ -84,7 +84,7 @@ Final Damage = max(0, Incoming Damage - DR)
 
 ## Accuracy & Evasion (Hit Check)
 
-Before dealing damage, an attack must **hit**. The attacker rolls a **d20**, which produces a multiplier on their accuracy stat. The resulting **Effective Accuracy** is displayed and compared by hand against the target's **Evasion** stat.
+Before dealing damage, an attack must **hit**. The attacker rolls a **d20**, which produces a multiplier on their accuracy stat. The resulting **Effective Accuracy** is compared against the target's **Evasion** stat to determine the **Glancing Blow** multiplier — how much of the damage actually lands.
 
 ### Which Accuracy Stat?
 
@@ -116,24 +116,68 @@ Values between anchors (1, 2, 10, 19, 20) are linearly interpolated.
 Effective Accuracy = Accuracy Stat * Roll Multiplier(d20)
 ```
 
-Compare the result against the target's Evasion stat:
-- If Effective Accuracy >= Enemy Evasion → **HIT** (proceed to damage)
-- If Effective Accuracy < Enemy Evasion → **MISS** (no damage)
-
 **Example:** Melee Accuracy 40, rolled a 15 on d20
 - Roll multiplier for 15 = ~1.56x (interpolated between 10→1.0 and 19→2.0)
 - Effective Accuracy = 40 * 1.56 = **62.4**
-- Compare 62.4 against the target's Evasion to determine hit/miss
 
-**Example:** Ranged Accuracy 30, rolled a 4 on d20
-- Roll multiplier for 4 = ~0.45x (interpolated between 2→0.20 and 10→1.00)
-- Effective Accuracy = 30 * 0.45 = **13.4**
-- Compare 13.4 against the target's Evasion to determine hit/miss
+---
+
+## Glancing Blow System
+
+When Effective Accuracy is close to the target's Evasion, damage is reduced on a sliding scale. This uses the **ratio** of accuracy to evasion:
+
+```
+ratio = Effective Accuracy / Enemy Evasion
+```
+
+### Glancing Blow Multiplier Table
+
+| Accuracy/Evasion Ratio | Damage Multiplier | Effect |
+|------------------------|-------------------|--------|
+| ≤ 0.90 (90%) | 0% | **MISS** — no damage |
+| 0.95 (95%) | 25% | Barely grazes |
+| 1.00 (100%) | 50% | Glancing hit |
+| 1.05 (105%) | 75% | Solid hit |
+| ≥ 1.10 (110%) | 100% | **Full hit** — no reduction |
+
+Values between anchors are **linearly interpolated**.
+
+### Formula
+
+```
+If evasion <= 0: multiplier = 1.0 (full damage)
+Otherwise:
+    ratio = Effective Accuracy / Evasion
+    Interpolate between anchors (0.90→0%, 0.95→25%, 1.00→50%, 1.05→75%, 1.10→100%)
+    Final Damage = floor(Raw Damage * Glancing Multiplier)
+```
+
+### Examples
+
+**Example 1:** Effective Accuracy 95, Enemy Evasion 100
+- Ratio = 95/100 = 0.95 → **25% damage**
+- If raw damage was 40 → Final = floor(40 * 0.25) = **10**
+
+**Example 2:** Effective Accuracy 100, Enemy Evasion 100
+- Ratio = 100/100 = 1.00 → **50% damage**
+- If raw damage was 40 → Final = floor(40 * 0.50) = **20**
+
+**Example 3:** Effective Accuracy 105, Enemy Evasion 100
+- Ratio = 105/100 = 1.05 → **75% damage**
+- If raw damage was 40 → Final = floor(40 * 0.75) = **30**
+
+**Example 4:** Effective Accuracy 110+, Enemy Evasion 100
+- Ratio = 110/100 = 1.10 → **100% damage** (full hit)
+- If raw damage was 40 → Final = **40**
+
+**Example 5:** Effective Accuracy 85, Enemy Evasion 100
+- Ratio = 85/100 = 0.85 → **0% damage (MISS)**
 
 ### Notes
 
-- The hit roll (d20) field is **optional** in the Combat Quick Use panel. If left blank, damage is calculated without an accuracy check.
-- Evasion acts as the target's "armor class" — the threshold that must be met or exceeded. This comparison is done manually by the DM.
+- The d20 roll and Enemy Evasion fields are **optional** in the Combat Quick Use panel. If left blank, damage is calculated without glancing blow reduction.
+- When taking an incoming hit, **both** Attacker Accuracy and Incoming Damage must be entered. The system applies glancing blow first, then Physical Defense DR.
+- The glancing blow system applies to **all** attack types (melee, ranged, and spells).
 
 ---
 
@@ -322,15 +366,15 @@ The mana cost is derived from the average damage of the roll, modified by the sl
 
 ### Weapon Attack
 ```
-Hit Check (d20 * Accuracy vs Evasion) → Roll Dice → Add Flat Bonus → Apply PBD/Precision Multiplier → Final Damage
+Hit Check (d20 * Accuracy) → Roll Dice → Add Flat Bonus → Apply PBD/Precision Multiplier → Apply Glancing Blow (Acc vs Evasion) → Final Damage
 ```
 
 ### Ability Cast
 ```
-Hit Check (d20 * Spellcraft vs Evasion) → Roll Dice → Add Flat Bonus → Add Overcast Bonus → Apply Slot Multiplier → Apply Mana Density Multiplier → Final Damage
+Hit Check (d20 * Spellcraft) → Roll Dice → Add Flat Bonus → Add Overcast Bonus → Apply Slot Multiplier → Apply Mana Density Multiplier → Apply Glancing Blow (Acc vs Evasion) → Final Damage
 ```
 
 ### Incoming Hit
 ```
-Incoming Damage → Subtract DR (from Phys Def / 5) → Apply to HP
+Incoming Damage → Apply Glancing Blow (Attacker Acc vs Your Evasion) → Subtract DR (from Phys Def / 5) → Apply to HP
 ```

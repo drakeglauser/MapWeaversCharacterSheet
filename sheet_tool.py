@@ -18,6 +18,7 @@ if getattr(sys, 'frozen', False):
         sys.stderr = open(os.devnull, 'w')
 
 import tkinter as tk
+import tkinter.font as tkFont
 from tkinter import ttk, messagebox, filedialog
 
 # ---------------- Theme / Dark Mode ----------------
@@ -65,21 +66,36 @@ LIGHT_COLORS = {
 PREFS_PATH = Path(os.path.expanduser("~")) / ".homebrew_sheet_prefs.json"
 
 
-def load_theme_pref() -> bool:
-    """Returns True if dark mode was saved, else False."""
+def load_prefs() -> dict:
+    """Load all preferences from disk. Returns dict with defaults for missing keys."""
+    defaults = {"dark_mode": False, "ui_scale": 1.0}
     try:
         with open(PREFS_PATH, "r") as f:
-            return json.load(f).get("dark_mode", False)
+            saved = json.load(f)
+        for k, v in defaults.items():
+            if k not in saved:
+                saved[k] = v
+        return saved
     except Exception:
-        return False
+        return dict(defaults)
+
+
+def save_prefs(prefs: dict):
+    try:
+        with open(PREFS_PATH, "w") as f:
+            json.dump(prefs, f)
+    except Exception:
+        pass
+
+
+def load_theme_pref() -> bool:
+    return load_prefs().get("dark_mode", False)
 
 
 def save_theme_pref(dark: bool):
-    try:
-        with open(PREFS_PATH, "w") as f:
-            json.dump({"dark_mode": dark}, f)
-    except Exception:
-        pass
+    prefs = load_prefs()
+    prefs["dark_mode"] = dark
+    save_prefs(prefs)
 
 
 def apply_ttk_theme(style: ttk.Style, colors: dict):
@@ -161,6 +177,7 @@ except ImportError:
     print("Warning: ollama package not found. Spell generation will use template-based fallback.")
 
 from damage_lab import DamageLabTab
+from battle_sim import BattleSimTab, build_sim_character
 
 # ---------------- File picking ----------------
 
@@ -433,6 +450,31 @@ def hit_roll_multiplier(d20_roll: int) -> float:
     for (r0, m0), (r1, m1) in zip(anchors, anchors[1:]):
         if r0 <= r <= r1:
             t = (r - r0) / (r1 - r0)
+            return m0 + t * (m1 - m0)
+    return 1.0
+
+
+def evasion_damage_multiplier(effective_accuracy: float, evasion: float) -> float:
+    """
+    Glancing blow system: damage multiplier based on accuracy-to-evasion ratio.
+    Uses piecewise linear interpolation between these anchors:
+      ratio <= 0.90  ->  0.00  (miss / no damage)
+      ratio  = 0.95  ->  0.25  (25% damage)
+      ratio  = 1.00  ->  0.50  (50% damage)
+      ratio  = 1.05  ->  0.75  (75% damage)
+      ratio >= 1.10  ->  1.00  (full damage)
+    """
+    if evasion <= 0:
+        return 1.0  # no evasion = full damage
+    ratio = effective_accuracy / evasion
+    anchors = [(0.90, 0.0), (0.95, 0.25), (1.00, 0.50), (1.05, 0.75), (1.10, 1.0)]
+    if ratio <= anchors[0][0]:
+        return anchors[0][1]
+    if ratio >= anchors[-1][0]:
+        return anchors[-1][1]
+    for (r0, m0), (r1, m1) in zip(anchors, anchors[1:]):
+        if r0 <= ratio <= r1:
+            t = (ratio - r0) / (r1 - r0)
             return m0 + t * (m1 - m0)
     return 1.0
 
@@ -1436,8 +1478,9 @@ class CharacterSheet(ttk.Frame):
         self.var_hp_dmg = tk.StringVar()
         self.var_hp_heal = tk.StringVar()
 
-        # NEW: incoming hit reduced by Physical Defense
+        # NEW: incoming hit reduced by Physical Defense + glancing blow
         self.var_hit_incoming = tk.StringVar()
+        self.var_hit_attacker_accuracy = tk.StringVar()
         self.var_hit_result = tk.StringVar(value="")
 
         self.var_core_current = tk.StringVar()
@@ -1499,6 +1542,7 @@ class CharacterSheet(ttk.Frame):
         self.var_combat_hit_roll = tk.StringVar()
         self.var_combat_roll_value = tk.StringVar()
         self.var_combat_mana_spend = tk.StringVar()
+        self.var_combat_enemy_evasion = tk.StringVar()
         self.var_combat_result = tk.StringVar(value="")
 
         # Track raw tk widgets that need manual theme styling
@@ -1541,6 +1585,8 @@ class CharacterSheet(ttk.Frame):
         self.tab_notes = ttk.Frame(self.tabs)
         self.tab_world = ttk.Frame(self.tabs)
         self.tab_damage_lab = ttk.Frame(self.tabs)
+        self.tab_battle_sim = ttk.Frame(self.tabs)
+        self.tab_settings = ttk.Frame(self.tabs)
         self.tab_spell_library = ttk.Frame(self.tabs)
 
         self.tabs.add(self.tab_overview, text="Overview")
@@ -1549,6 +1595,8 @@ class CharacterSheet(ttk.Frame):
         self.tabs.add(self.tab_notes, text="Notes")
         self.tabs.add(self.tab_world, text="World Info")
         self.tabs.add(self.tab_damage_lab, text="Damage Lab")
+        self.tabs.add(self.tab_battle_sim, text="Battle Sim")
+        self.tabs.add(self.tab_settings, text="Settings")
         if self.is_dm:
             self.tabs.add(self.tab_spell_library, text="Spell Library (DM)")
 
@@ -1558,6 +1606,8 @@ class CharacterSheet(ttk.Frame):
         self._build_notes_tab()
         self._build_world_tab()
         self._build_damage_lab_tab()
+        self._build_battle_sim_tab()
+        self._build_settings_tab()
         self._build_spell_library_tab()
 
     def _build_overview_tab(self):
@@ -1583,46 +1633,49 @@ class CharacterSheet(ttk.Frame):
         ttk.Label(res_frame, text="/").grid(row=0, column=2)
         ttk.Entry(res_frame, textvariable=self.var_hp_max, width=6).grid(row=0, column=3)
 
-        ttk.Label(res_frame, text="Take dmg:").grid(row=1, column=0, sticky="w", padx=4, pady=3)
-        ttk.Entry(res_frame, textvariable=self.var_hp_dmg, width=8).grid(row=1, column=1, sticky="w")
-        ttk.Button(res_frame, text="Apply", command=self.apply_hp_damage).grid(row=1, column=3, sticky="w", padx=4)
+        #ttk.Label(res_frame, text="Take dmg:").grid(row=1, column=0, sticky="w", padx=4, pady=3)
+        #ttk.Entry(res_frame, textvariable=self.var_hp_dmg, width=8).grid(row=1, column=1, sticky="w")
+        #ttk.Button(res_frame, text="Apply", command=self.apply_hp_damage).grid(row=1, column=3, sticky="w", padx=4)
 
         ttk.Label(res_frame, text="Heal:").grid(row=2, column=0, sticky="w", padx=4, pady=3)
         ttk.Entry(res_frame, textvariable=self.var_hp_heal, width=8).grid(row=2, column=1, sticky="w")
         ttk.Button(res_frame, text="Apply", command=self.apply_hp_heal).grid(row=2, column=3, sticky="w", padx=4)
 
-        # NEW: Incoming hit (Physical Defense DR)
+        # Incoming hit (Glancing Blow + Physical Defense DR)
         ttk.Separator(res_frame, orient="horizontal").grid(row=3, column=0, columnspan=4, sticky="ew", padx=4, pady=6)
 
-        ttk.Label(res_frame, text="Incoming hit:").grid(row=4, column=0, sticky="w", padx=4, pady=3)
-        ttk.Entry(res_frame, textvariable=self.var_hit_incoming, width=8).grid(row=4, column=1, sticky="w")
-        ttk.Button(res_frame, text="Apply (uses Phys Def DR)", command=self.apply_incoming_hit).grid(
-            row=4, column=2, columnspan=2, sticky="ew", padx=4
+        ttk.Label(res_frame, text="Attacker Accuracy:").grid(row=4, column=0, sticky="w", padx=4, pady=3)
+        ttk.Entry(res_frame, textvariable=self.var_hit_attacker_accuracy, width=8).grid(row=4, column=1, sticky="w")
+
+        ttk.Label(res_frame, text="Incoming hit:").grid(row=5, column=0, sticky="w", padx=4, pady=3)
+        ttk.Entry(res_frame, textvariable=self.var_hit_incoming, width=8).grid(row=5, column=1, sticky="w")
+        ttk.Button(res_frame, text="Apply (Glancing + DR)", command=self.apply_incoming_hit).grid(
+            row=5, column=2, columnspan=2, sticky="ew", padx=4
         )
         ttk.Label(res_frame, textvariable=self.var_hit_result, foreground="gray").grid(
-            row=5, column=0, columnspan=4, sticky="w", padx=4, pady=(2, 4)
+            row=6, column=0, columnspan=4, sticky="w", padx=4, pady=(2, 4)
         )
 
-        ttk.Separator(res_frame, orient="horizontal").grid(row=6, column=0, columnspan=4, sticky="ew", padx=4, pady=6)
+        ttk.Separator(res_frame, orient="horizontal").grid(row=7, column=0, columnspan=4, sticky="ew", padx=4, pady=6)
 
-        ttk.Label(res_frame, text="Mana:").grid(row=7, column=0, sticky="w", padx=4, pady=3)
-        ttk.Entry(res_frame, textvariable=self.var_mana_current, width=6).grid(row=7, column=1)
-        ttk.Label(res_frame, text="/").grid(row=7, column=2)
-        ttk.Entry(res_frame, textvariable=self.var_mana_max, width=6).grid(row=7, column=3)
+        ttk.Label(res_frame, text="Mana:").grid(row=8, column=0, sticky="w", padx=4, pady=3)
+        ttk.Entry(res_frame, textvariable=self.var_mana_current, width=6).grid(row=8, column=1)
+        ttk.Label(res_frame, text="/").grid(row=8, column=2)
+        ttk.Entry(res_frame, textvariable=self.var_mana_max, width=6).grid(row=8, column=3)
 
-        ttk.Label(res_frame, text="Mana Density:").grid(row=8, column=0, sticky="w", padx=4, pady=3)
-        ttk.Entry(res_frame, textvariable=self.var_mana_density, width=6).grid(row=8, column=1)
-        ttk.Label(res_frame, textvariable=self.var_mana_density_mult, foreground="gray").grid(row=8, column=3, sticky="w", padx=4)
+        ttk.Label(res_frame, text="Mana Density:").grid(row=9, column=0, sticky="w", padx=4, pady=3)
+        ttk.Entry(res_frame, textvariable=self.var_mana_density, width=6).grid(row=9, column=1)
+        ttk.Label(res_frame, textvariable=self.var_mana_density_mult, foreground="gray").grid(row=9, column=3, sticky="w", padx=4)
 
-        ttk.Label(res_frame, text="Unspent pts:").grid(row=9, column=0, sticky="w", padx=4, pady=3)
-        ttk.Entry(res_frame, textvariable=self.var_unspent, width=6).grid(row=9, column=1)
+        ttk.Label(res_frame, text="Unspent pts:").grid(row=10, column=0, sticky="w", padx=4, pady=3)
+        ttk.Entry(res_frame, textvariable=self.var_unspent, width=6).grid(row=10, column=1)
 
         ttk.Button(res_frame, text="Spend Points…", command=self.open_spend_points_popup).grid(
-            row=10, column=0, columnspan=4, sticky="ew", padx=4, pady=(8, 4)
+            row=11, column=0, columnspan=4, sticky="ew", padx=4, pady=(8, 4)
         )
 
         ttk.Button(res_frame, text="Long Rest (full HP/Mana)", command=self.apply_long_rest).grid(
-            row=11, column=0, columnspan=4, sticky="ew", padx=4, pady=(6, 4)
+            row=12, column=0, columnspan=4, sticky="ew", padx=4, pady=(6, 4)
         )
 
         # Combat quick use
@@ -1656,19 +1709,22 @@ class CharacterSheet(ttk.Frame):
         ttk.Entry(hit_row, textvariable=self.var_combat_hit_roll, width=10).pack(side=tk.LEFT)
         ttk.Button(hit_row, text="Check Accuracy", command=self.check_accuracy).pack(side=tk.LEFT, padx=(6, 0))
 
-        ttk.Label(c_right, text="Enter rolled damage:").grid(row=3, column=0, sticky="w", padx=4, pady=(10, 2))
-        ttk.Entry(c_right, textvariable=self.var_combat_roll_value, width=10).grid(row=3, column=1, sticky="w", padx=4, pady=(10, 2))
+        ttk.Label(c_right, text="Enemy Evasion:").grid(row=3, column=0, sticky="w", padx=4, pady=2)
+        ttk.Entry(c_right, textvariable=self.var_combat_enemy_evasion, width=10).grid(row=3, column=1, sticky="w", padx=4, pady=2)
 
-        ttk.Label(c_right, text="Mana to spend (abilities):").grid(row=4, column=0, sticky="w", padx=4, pady=2)
+        ttk.Label(c_right, text="Enter rolled damage:").grid(row=4, column=0, sticky="w", padx=4, pady=(10, 2))
+        ttk.Entry(c_right, textvariable=self.var_combat_roll_value, width=10).grid(row=4, column=1, sticky="w", padx=4, pady=(10, 2))
+
+        ttk.Label(c_right, text="Mana to spend (abilities):").grid(row=5, column=0, sticky="w", padx=4, pady=2)
         self.combat_mana_entry = ttk.Entry(c_right, textvariable=self.var_combat_mana_spend, width=10)
-        self.combat_mana_entry.grid(row=4, column=1, sticky="w", padx=4, pady=2)
+        self.combat_mana_entry.grid(row=5, column=1, sticky="w", padx=4, pady=2)
 
         ttk.Button(c_right, text="Use / Cast", command=self.use_combat_action).grid(
-            row=5, column=0, columnspan=2, sticky="ew", padx=4, pady=(12, 6)
+            row=6, column=0, columnspan=2, sticky="ew", padx=4, pady=(12, 6)
         )
 
         ttk.Label(c_right, textvariable=self.var_combat_result, foreground="gray").grid(
-            row=6, column=0, columnspan=2, sticky="w", padx=4, pady=(2, 2)
+            row=7, column=0, columnspan=2, sticky="w", padx=4, pady=(2, 2)
         )
 
         for col in range(2):
@@ -1803,9 +1859,11 @@ class CharacterSheet(ttk.Frame):
                 style_tk_widget(w, colors)
             except Exception:
                 pass
-        # Also theme the damage lab
+        # Also theme the damage lab and battle sim
         if hasattr(self, "damage_lab"):
             self.damage_lab.apply_theme(colors)
+        if hasattr(self, "battle_sim"):
+            self.battle_sim.apply_theme(colors)
         # Re-color stat calculations markdown tags
         if hasattr(self, "stat_calc_text"):
             tw = self.stat_calc_text
@@ -3036,6 +3094,81 @@ class CharacterSheet(ttk.Frame):
                 tw.insert(tk.END, part, base_tag)
         tw.insert(tk.END, "\n")
 
+    # ---------------- Settings ----------------
+
+    def _build_settings_tab(self):
+        frame = ttk.Frame(self.tab_settings)
+        frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        ttk.Label(frame, text="Settings", font=("Segoe UI", 14, "bold")).pack(anchor="w", pady=(0, 16))
+
+        # --- Theme ---
+        theme_frame = ttk.LabelFrame(frame, text="Appearance")
+        theme_frame.pack(fill=tk.X, pady=(0, 16))
+
+        theme_row = ttk.Frame(theme_frame)
+        theme_row.pack(fill=tk.X, padx=12, pady=10)
+
+        ttk.Label(theme_row, text="Theme:").pack(side=tk.LEFT, padx=(0, 8))
+        self._settings_theme_btn = ttk.Button(
+            theme_row, text="Switch to Light Mode" if self._get_app().dark_mode else "Switch to Dark Mode",
+            command=self._settings_toggle_theme
+        )
+        self._settings_theme_btn.pack(side=tk.LEFT)
+
+        # --- UI Scale ---
+        scale_frame = ttk.LabelFrame(frame, text="UI Scale")
+        scale_frame.pack(fill=tk.X, pady=(0, 16))
+
+        scale_inner = ttk.Frame(scale_frame)
+        scale_inner.pack(fill=tk.X, padx=12, pady=10)
+
+        ttk.Label(scale_inner, text="Scale:").pack(side=tk.LEFT, padx=(0, 8))
+
+        app = self._get_app()
+        self._scale_var = tk.DoubleVar(value=getattr(app, '_ui_scale', 1.0))
+        self._scale_label = ttk.Label(scale_inner, text=f"{self._scale_var.get():.0%}")
+        self._scale_label.pack(side=tk.RIGHT, padx=(8, 0))
+
+        self._scale_slider = ttk.Scale(
+            scale_inner, from_=0.5, to=2.0, orient=tk.HORIZONTAL,
+            variable=self._scale_var, command=self._on_scale_change
+        )
+        self._scale_slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        ttk.Button(scale_inner, text="Reset to 100%", command=self._reset_scale).pack(side=tk.RIGHT, padx=(8, 0))
+
+    def _get_app(self):
+        return self.winfo_toplevel()
+
+    def _settings_toggle_theme(self):
+        app = self._get_app()
+        if hasattr(app, '_toggle_theme'):
+            app._toggle_theme()
+        # Update button text
+        if hasattr(self, '_settings_theme_btn'):
+            self._settings_theme_btn.configure(
+                text="Switch to Light Mode" if app.dark_mode else "Switch to Dark Mode"
+            )
+
+    def _on_scale_change(self, val):
+        scale = float(val)
+        # Snap to nearest 5%
+        scale = round(scale * 20) / 20
+        self._scale_var.set(scale)
+        self._scale_label.configure(text=f"{scale:.0%}")
+
+        app = self._get_app()
+        if hasattr(app, '_set_ui_scale'):
+            app._set_ui_scale(scale)
+
+    def _reset_scale(self):
+        self._scale_var.set(1.0)
+        self._scale_label.configure(text="100%")
+        app = self._get_app()
+        if hasattr(app, '_set_ui_scale'):
+            app._set_ui_scale(1.0)
+
     # ---------------- Damage Lab ----------------
 
     def _build_damage_lab_tab(self):
@@ -3069,6 +3202,53 @@ class CharacterSheet(ttk.Frame):
             return int(self.var_mana_density.get().strip() or "0")
         except ValueError:
             return 0
+
+    # ---------------- Battle Sim ----------------
+
+    def _build_battle_sim_tab(self):
+        self.battle_sim = BattleSimTab(
+            self.tab_battle_sim,
+            get_char_a_data=self._battle_sim_get_char_a_data,
+            get_char_a_actions=self._battle_sim_get_char_a_actions,
+        )
+        self.battle_sim.pack(fill=tk.BOTH, expand=True)
+
+    def _battle_sim_get_char_a_data(self):
+        """Build a sim character dict from this sheet's live data."""
+        try:
+            char = {
+                "name": self.var_name.get() or "Character A",
+                "stats": {},
+                "hp_max": int(self.var_hp_max.get().strip() or "20"),
+                "hp_current": int(self.var_hp_current.get().strip() or "20"),
+                "mana_max": int(self.var_mana_max.get().strip() or "10"),
+                "mana_current": int(self.var_mana_current.get().strip() or "10"),
+                "mana_density": int(self.var_mana_density.get().strip() or "0"),
+                "actions": [],
+            }
+            for k in STAT_KEYS:
+                try:
+                    char["stats"][k] = int(self.var_stats[k].get().strip() or "0")
+                except (ValueError, KeyError):
+                    char["stats"][k] = 0
+
+            # Build actions from equipment + abilities
+            self.refresh_combat_list()
+            for a in self.combat_actions:
+                char["actions"].append({
+                    "kind": a["kind"],
+                    "slot": a.get("slot"),
+                    "ref": a["ref"],
+                    "name": a.get("name", ""),
+                    "display": a.get("display", a.get("name", "")),
+                })
+            return char
+        except Exception:
+            return None
+
+    def _battle_sim_get_char_a_actions(self):
+        self.refresh_combat_list()
+        return self.combat_actions
 
     def _build_spell_library_tab(self):
         """Build the Spell Library tab (DM tool)."""
@@ -3400,9 +3580,23 @@ class CharacterSheet(ttk.Frame):
         roll_mult = hit_roll_multiplier(d20)
         effective_acc = acc_val * roll_mult
 
-        self.var_combat_result.set(
-            f"Accuracy: {effective_acc:.1f} ({acc_label} {acc_val} x{roll_mult:.2f}, d20={d20})"
-        )
+        result = f"Accuracy: {effective_acc:.1f} ({acc_label} {acc_val} x{roll_mult:.2f}, d20={d20})"
+
+        # If enemy evasion is provided, show glancing blow info
+        ev_str = self.var_combat_enemy_evasion.get().strip()
+        if ev_str:
+            try:
+                evasion = float(ev_str)
+                glance_mult = evasion_damage_multiplier(effective_acc, evasion)
+                pct = int(glance_mult * 100)
+                if pct == 0:
+                    result += f" | MISS (Evasion {evasion:.0f}, ratio {effective_acc/evasion:.2f})"
+                else:
+                    result += f" | Glancing: {pct}% dmg (Evasion {evasion:.0f}, ratio {effective_acc/evasion:.2f})"
+            except ValueError:
+                pass
+
+        self.var_combat_result.set(result)
 
     def use_combat_action(self):
         if self.combat_selected_ref is None:
@@ -3420,9 +3614,10 @@ class CharacterSheet(ttk.Frame):
 
         ref = chosen["ref"]
 
-        # -------- Accuracy calculation --------
+        # -------- Accuracy & Glancing Blow --------
         hit_roll_str = self.var_combat_hit_roll.get().strip()
         hit_info = ""
+        effective_acc = None
 
         if hit_roll_str:
             try:
@@ -3432,7 +3627,6 @@ class CharacterSheet(ttk.Frame):
                 return
             d20 = max(1, min(20, d20))
 
-            # Determine which accuracy stat to use
             if chosen["kind"] == "ability":
                 acc_key, acc_label = "spellcraft", "Spellcraft"
             elif bool(ref.get("is_ranged", False)):
@@ -3451,6 +3645,24 @@ class CharacterSheet(ttk.Frame):
             hit_info = (
                 f"Accuracy: {effective_acc:.1f} ({acc_label} {acc_val} x{roll_mult:.2f}, d20={d20}) | "
             )
+
+        # Determine glancing blow multiplier if both accuracy and evasion are given
+        glance_mult = 1.0
+        glance_info = ""
+        ev_str = self.var_combat_enemy_evasion.get().strip()
+        if ev_str and effective_acc is not None:
+            try:
+                evasion = float(ev_str)
+                glance_mult = evasion_damage_multiplier(effective_acc, evasion)
+                pct = int(glance_mult * 100)
+                if pct == 0:
+                    self.var_combat_result.set(
+                        f"{hit_info}MISS — Evasion {evasion:.0f}, ratio {effective_acc/evasion:.2f} (below 90%)"
+                    )
+                    return
+                glance_info = f" * Glancing {pct}%"
+            except ValueError:
+                pass
 
         # -------- Damage calculation --------
         try:
@@ -3474,7 +3686,14 @@ class CharacterSheet(ttk.Frame):
             is_ranged = bool(ref.get("is_ranged", False))
 
             if not apply_bonus:
-                self.var_combat_result.set(f"{hit_info}Item: base {base} (rolled {rolled} + flat {flat_bonus}) → Total {base} (no bonus)")
+                raw_total = base
+                final_total = int(math.floor(raw_total * glance_mult))
+                result = f"{hit_info}Item: base {base} (rolled {rolled} + flat {flat_bonus})"
+                if glance_info:
+                    result += f"{glance_info} → Total {final_total} (no bonus)"
+                else:
+                    result += f" → Total {raw_total} (no bonus)"
+                self.var_combat_result.set(result)
                 return
 
             if is_ranged:
@@ -3491,15 +3710,20 @@ class CharacterSheet(ttk.Frame):
                 label = "PBD"
 
             mult = mana_density_multiplier(pts)
-            total = int(math.floor(base * mult))
-            self.var_combat_result.set(
+            raw_total = int(math.floor(base * mult))
+            final_total = int(math.floor(raw_total * glance_mult))
+            result = (
                 f"{hit_info}Item: base {base} (rolled {rolled} + flat {flat_bonus}) "
-                f"* {label} x{mult:.2f} ({pts} pts) "
-                f"→ Total {total}"
+                f"* {label} x{mult:.2f} ({pts} pts)"
             )
+            if glance_info:
+                result += f"{glance_info} → Total {final_total}"
+            else:
+                result += f" → Total {raw_total}"
+            self.var_combat_result.set(result)
             return
 
-        # -------- Abilities: NO PBD/Precision, slot multipliers + overcast + mana density --------
+        # -------- Abilities: slot multipliers + overcast + mana density --------
         slot = chosen.get("slot", "inner")
         mods = ABILITY_MODS.get(slot, {"dmg": 1.0, "mana": 1.0})
         dmg_mult = float(mods["dmg"])
@@ -3538,16 +3762,22 @@ class CharacterSheet(ttk.Frame):
         md_mult = mana_density_multiplier(md_pts)
 
         over_bonus = compute_overcast_bonus(base_eff, spent_eff, ref.get("overcast", {}))
-        total = int(math.floor((base + over_bonus) * dmg_mult * md_mult))
+        raw_total = int(math.floor((base + over_bonus) * dmg_mult * md_mult))
+        final_total = int(math.floor(raw_total * glance_mult))
 
         self.var_mana_current.set(str(cur_mana - spent_eff))
 
-        ratio = spent_eff / base_eff if base_eff > 0 else 1.0
-        self.var_combat_result.set(
+        spend_ratio = spent_eff / base_eff if base_eff > 0 else 1.0
+        result = (
             f"{hit_info}{slot.title()} ability: base {base} (rolled {rolled} + flat {flat_bonus}), "
-            f"overcast +{over_bonus} (spent {spent_eff}/{base_eff}={ratio:.2f}x), "
-            f"*{dmg_mult:.2f} slot *{md_mult:.2f} mana density → {total}. Mana spent: {spent_eff}."
+            f"overcast +{over_bonus} (spent {spent_eff}/{base_eff}={spend_ratio:.2f}x), "
+            f"*{dmg_mult:.2f} slot *{md_mult:.2f} mana density"
         )
+        if glance_info:
+            result += f"{glance_info} → {final_total}. Mana spent: {spent_eff}."
+        else:
+            result += f" → {raw_total}. Mana spent: {spent_eff}."
+        self.var_combat_result.set(result)
 
     # ---------------- HP / Rest ----------------
 
@@ -3587,13 +3817,26 @@ class CharacterSheet(ttk.Frame):
 
     def apply_incoming_hit(self):
         """
-        Apply an incoming hit to HP after flat DR from Physical Defense.
-        DR = floor(phys_def / 5).
+        Apply an incoming hit to HP after glancing blow + flat DR from Physical Defense.
+        Requires both Attacker Accuracy and Incoming Hit to be filled in.
         """
+        acc_str = self.var_hit_attacker_accuracy.get().strip()
+        inc_str = self.var_hit_incoming.get().strip()
+
+        if not acc_str or not inc_str:
+            messagebox.showwarning("Hit", "Enter both Attacker Accuracy and Incoming Hit damage.")
+            return
+
         try:
-            incoming = int(self.var_hit_incoming.get().strip())
+            attacker_acc = float(acc_str)
         except ValueError:
-            messagebox.showwarning("Hit", "Enter an incoming hit damage number.")
+            messagebox.showwarning("Hit", "Attacker Accuracy must be a number.")
+            return
+
+        try:
+            incoming = int(inc_str)
+        except ValueError:
+            messagebox.showwarning("Hit", "Incoming Hit must be a number.")
             return
 
         try:
@@ -3602,18 +3845,42 @@ class CharacterSheet(ttk.Frame):
         except ValueError:
             return
 
+        # Glancing blow: compare attacker accuracy vs your Evasion stat
+        try:
+            evasion_pts = int(self.var_stats["evasion"].get().strip() or "0")
+        except Exception:
+            evasion_pts = 0
+
+        glance_mult = evasion_damage_multiplier(attacker_acc, evasion_pts)
+        glance_pct = int(glance_mult * 100)
+
+        if glance_pct == 0:
+            self.var_hit_incoming.set("")
+            self.var_hit_attacker_accuracy.set("")
+            self.var_hit_result.set(
+                f"MISS — Accuracy {attacker_acc:.1f} vs Evasion {evasion_pts}, "
+                f"ratio {attacker_acc/evasion_pts:.2f} (below 90%)" if evasion_pts > 0 else "MISS"
+            )
+            return
+
+        after_glance = int(math.floor(incoming * glance_mult))
+
+        # Physical Defense DR
         try:
             phys_def_pts = int(self.var_stats["phys_def"].get().strip() or "0")
         except Exception:
             phys_def_pts = 0
 
         dr = phys_dr_from_points(phys_def_pts)
-        final = max(0, incoming - dr)
+        final = max(0, after_glance - dr)
 
         new_hp = max(0, min(mx, cur - final))
         self.var_hp_current.set(str(new_hp))
         self.var_hit_incoming.set("")
-        self.var_hit_result.set(f"Hit {incoming} - DR {dr} = {final} → HP {new_hp}/{mx}")
+        self.var_hit_attacker_accuracy.set("")
+        self.var_hit_result.set(
+            f"Hit {incoming} * Glancing {glance_pct}% = {after_glance} - DR {dr} = {final} → HP {new_hp}/{mx}"
+        )
 
     def _reset_long_rest_uses(self):
         self.var_show_used.set(False)
@@ -4040,10 +4307,21 @@ class CharacterApp(tk.Tk):
         self.geometry("1150x780")
         self.sheets: list = []
 
-        # Theme state
-        self.dark_mode = load_theme_pref()
+        # Theme & scaling state
+        prefs = load_prefs()
+        self.dark_mode = prefs.get("dark_mode", False)
+        self._ui_scale = prefs.get("ui_scale", 1.0)
         self._current_colors = DARK_COLORS if self.dark_mode else LIGHT_COLORS
         self._style = ttk.Style(self)
+
+        # Capture base font sizes before any scaling
+        self._base_font_sizes = {}
+        for name in tkFont.names(self):
+            f = tkFont.nametofont(name, root=self)
+            self._base_font_sizes[name] = f.cget("size")
+
+        # Apply initial UI scale
+        self._apply_ui_scale(self._ui_scale)
 
         if is_dm:
             self._build_dm_ui(initial_paths)
@@ -4059,12 +4337,6 @@ class CharacterApp(tk.Tk):
     # ---- Player mode ----
 
     def _build_player_ui(self, path: Path):
-        # Theme toggle bar
-        theme_bar = ttk.Frame(self)
-        theme_bar.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(4, 0))
-        self._theme_btn = ttk.Button(theme_bar, text="Dark Mode", command=self._toggle_theme)
-        self._theme_btn.pack(side=tk.RIGHT)
-
         sheet = CharacterSheet(self, path, is_dm=False)
         sheet.pack(fill=tk.BOTH, expand=True)
         self.sheets.append(sheet)
@@ -4079,8 +4351,6 @@ class CharacterApp(tk.Tk):
         ttk.Button(dm_bar, text="New Character...", command=self.dm_new_character).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(dm_bar, text="Close Tab", command=self.dm_close_current_tab).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(dm_bar, text="Save All", command=self.dm_save_all).pack(side=tk.RIGHT)
-        self._theme_btn = ttk.Button(dm_bar, text="Dark Mode", command=self._toggle_theme)
-        self._theme_btn.pack(side=tk.RIGHT, padx=(0, 6))
 
         self.master_notebook = ttk.Notebook(self)
         self.master_notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(4, 10))
@@ -4186,9 +4456,33 @@ class CharacterApp(tk.Tk):
         colors = self._current_colors
         apply_ttk_theme(self._style, colors)
         self.configure(bg=colors["bg"])
-        self._theme_btn.configure(text="Light Mode" if self.dark_mode else "Dark Mode")
         for sheet in self.sheets:
             sheet.apply_theme(colors)
+            # Update Settings tab theme button text
+            if hasattr(sheet, '_settings_theme_btn'):
+                sheet._settings_theme_btn.configure(
+                    text="Switch to Light Mode" if self.dark_mode else "Switch to Dark Mode"
+                )
+
+    # ---- UI Scaling ----
+
+    def _apply_ui_scale(self, scale: float):
+        """Apply UI scaling by adjusting all named font sizes."""
+        for name, base_size in self._base_font_sizes.items():
+            f = tkFont.nametofont(name, root=self)
+            # Font sizes can be negative (pixel-based) or positive (point-based)
+            new_size = int(base_size * scale) if base_size > 0 else int(base_size * scale)
+            if new_size == 0:
+                new_size = -1 if base_size < 0 else 1
+            f.configure(size=new_size)
+
+    def _set_ui_scale(self, scale: float):
+        """Set and save UI scale, then apply it."""
+        self._ui_scale = scale
+        prefs = load_prefs()
+        prefs["ui_scale"] = scale
+        save_prefs(prefs)
+        self._apply_ui_scale(scale)
 
     def on_close(self):
         for sheet in list(self.sheets):

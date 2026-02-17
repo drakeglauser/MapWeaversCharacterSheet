@@ -43,9 +43,11 @@ Goals of the system
   - 10–14 => DR 2
   - etc.
 
-7) Evasion (Avoidance)
-- Used to avoid being hit across melee, ranged, and many non-mental spells.
-- It is the “dodge” stat in opposed roll contests.
+7) Evasion (Avoidance / Glancing Blow)
+- Used to reduce incoming damage via the Glancing Blow system.
+- Compares attacker's Effective Accuracy against defender's Evasion as a ratio.
+- Ratio ≤ 0.90 → MISS (0% damage), 0.95 → 25%, 1.00 → 50%, 1.05 → 75%, ≥ 1.10 → 100% (full hit).
+- Values between anchors are linearly interpolated.
 
 8) Wis (Mental Defense)
 - Used to resist mental attacks (hit chance and/or severity).
@@ -115,7 +117,7 @@ Notes:
 1) Roll base damage from the item/spell dice
 2) Add flat bonus from the damage expression (e.g., +3)
 3) Apply PBD/Precision multiplier (if applicable)
-4) Apply hit quality multiplier (0.1x–2.5x) (if you’re using it)
+4) Apply Glancing Blow multiplier (Accuracy vs Evasion ratio → 0%–100% damage)
 5) Apply resist/weak/vuln multipliers (if used)
 6) Apply Physical Defense DR (flat reduction) if the damage is physical
 7) Apply crit rules (if used)
