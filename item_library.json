@@ -1,0 +1,21 @@
+{
+  "items": [
+    {
+      "id": "20260222_170728_e887da",
+      "item": {
+        "name": "chess",
+        "favorite": false,
+        "roll_type": "Attack",
+        "damage": "1d10",
+        "notes": "",
+        "apply_bonus": true,
+        "is_ranged": false
+      },
+      "metadata": {
+        "date_created": "2026-02-22T17:07:28.229928",
+        "source_character": "New Hero",
+        "category": "equipment"
+      }
+    }
+  ]
+}

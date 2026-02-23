@@ -365,19 +365,20 @@ T1_HP_GAIN_AFTER_CAP = 1  # tweak if you want a different post-cap rate
 
 # ---------- New Stats (your list) ----------
 STAT_ORDER = [
-    ("melee_acc",  "Melee Accuracy"),
-    ("ranged_acc", "Ranged Weapon Accuracy"),
-    ("spellcraft", "Spellcraft"),
-    ("pbd",        "PBD"),
-    ("precision",  "Precision"),
+    ("melee_acc",     "Melee Accuracy"),
+    ("ranged_acc",    "Ranged Weapon Accuracy"),
+    ("spellcraft",    "Spellcraft"),
+    ("pbd",           "PBD"),
+    ("mana_density",  "Mana Density"),
+    ("precision",     "Precision"),
 
-    ("phys_def",   "Defense"),
-    ("evasion",    "Evasion"),
-    ("wis_def",    "Wisdom"),
+    ("phys_def",      "Defense"),
+    ("evasion",       "Evasion"),
+    ("wis_def",       "Wisdom"),
 
-    ("utility",    "Utility"),
-    ("agility",    "Agility"),
-    ("strength",   "Strength"),
+    ("utility",       "Utility"),
+    ("agility",       "Agility"),
+    ("strength",      "Strength"),
 ]
 STAT_KEYS = [k for k, _ in STAT_ORDER]
 
@@ -555,10 +556,9 @@ def default_character_template(name="New Hero"):
         "resources": {
             "hp": {"current": 20, "max": 20},
             "mana": {"current": 10, "max": 10},
-            "mana_density": 0,
             "unspent_points": 0
         },
-        "stats": {k: 5 for k in STAT_KEYS},
+        "stats": {k: (0 if k == "mana_density" else 5) for k in STAT_KEYS},
         "skills": {
             "core": {"current": 0, "max": 2},
             "inner": {"current": 0, "max": 5},
@@ -625,9 +625,50 @@ def _migrate_stats_schema(char: dict):
             stats["pbd"] = old_pbd
         del res["pbd"]
 
+    # Migrate Mana Density from resources to stats (old saves stored it under resources)
+    if isinstance(res, dict) and "mana_density" in res:
+        old_md = _get_int(res, "mana_density", 0)
+        if old_md > 0 and stats.get("mana_density", 0) == 0:
+            stats["mana_density"] = old_md
+        del res["mana_density"]
+
 
 def sort_favorites_first(items):
     return sorted(items, key=lambda it: (not bool(it.get("favorite", False)), it.get("name", "").lower()))
+
+
+BOOST_TARGETS = STAT_KEYS + ["hp_max", "mana_max"]
+BOOST_TARGET_LABELS = [(k, lbl) for k, lbl in STAT_ORDER] + [("hp_max", "HP Max"), ("mana_max", "Mana Max")]
+
+
+def _normalize_stat_boosts(raw) -> list:
+    """Normalize stat_boosts list from saved data. Each boost is {stat, value, mode}."""
+    if not isinstance(raw, list):
+        return []
+    boosts = []
+    for b in raw:
+        if not isinstance(b, dict):
+            continue
+        stat = b.get("stat", "")
+        if stat not in BOOST_TARGETS:
+            continue
+        try:
+            value = float(b.get("value", 0) or 0)
+        except (ValueError, TypeError):
+            value = 0
+        mode = b.get("mode", "flat")
+        if mode not in ("flat", "percent"):
+            mode = "flat"
+        if value != 0:
+            boosts.append({"stat": stat, "value": value, "mode": mode})
+    return boosts
+
+
+def _safe_int(v, default=0):
+    try:
+        return int(v or default)
+    except (ValueError, TypeError):
+        return default
 
 
 def ensure_item_obj(x):
@@ -635,20 +676,25 @@ def ensure_item_obj(x):
     Items:
       - apply_bonus: whether to apply PBD (melee) or Precision (ranged)
       - is_ranged: whether to treat this as a ranged item (use Precision)
+      - stat_boosts: list of passive stat boosts [{stat, value, mode}]
+      - consumable: if True, item is removed on use
+      - consume_heal_hp / consume_heal_mana: instant heal on consume
+      - consume_turns: if >0, stat_boosts become a temporary buff for N turns
     Back-compat:
       - older files may have apply_pbd
     """
+    defaults = {
+        "name": "", "favorite": False, "roll_type": "None", "damage": "",
+        "notes": "", "apply_bonus": True, "apply_pbd": True, "is_ranged": False,
+        "stat_boosts": [], "consumable": False,
+        "consume_heal_hp": 0, "consume_heal_mana": 0, "consume_turns": 0,
+        "consume_perm_stat": "", "consume_perm_value": 0,
+        "is_growth_item": False, "weight": 0.0,
+    }
     if isinstance(x, str):
-        return {
-            "name": x,
-            "favorite": False,
-            "roll_type": "None",
-            "damage": "",
-            "notes": "",
-            "apply_bonus": True,
-            "apply_pbd": True,     # back-compat
-            "is_ranged": False
-        }
+        d = dict(defaults)
+        d["name"] = x
+        return d
     if isinstance(x, dict):
         apply_bonus = bool(x.get("apply_bonus", x.get("apply_pbd", True)))
         is_ranged = bool(x.get("is_ranged", False))
@@ -661,9 +707,17 @@ def ensure_item_obj(x):
             "apply_bonus": apply_bonus,
             "apply_pbd": apply_bonus,   # keep synced for damage_lab back-compat
             "is_ranged": is_ranged,
+            "stat_boosts": _normalize_stat_boosts(x.get("stat_boosts")),
+            "consumable": bool(x.get("consumable", False)),
+            "consume_heal_hp": _safe_int(x.get("consume_heal_hp"), 0),
+            "consume_heal_mana": _safe_int(x.get("consume_heal_mana"), 0),
+            "consume_turns": _safe_int(x.get("consume_turns"), 0),
+            "consume_perm_stat": x.get("consume_perm_stat", ""),
+            "consume_perm_value": _safe_int(x.get("consume_perm_value"), 0),
+            "is_growth_item": bool(x.get("is_growth_item", False)),
+            "weight": float(x.get("weight", 0) or 0),
         }
-    return {"name": "", "favorite": False, "roll_type": "None", "damage": "", "notes": "",
-            "apply_bonus": True, "apply_pbd": True, "is_ranged": False}
+    return dict(defaults)
 
 
 def ensure_ability_obj(x):
@@ -674,7 +728,8 @@ def ensure_ability_obj(x):
         return {
             "name": x, "favorite": False, "roll_type": "None",
             "damage": "", "mana_cost": 0, "notes": "",
-            "overcast": {"enabled": False, "scale": 0, "power": 0.85, "cap": 999}
+            "overcast": {"enabled": False, "scale": 0, "power": 0.85, "cap": 999},
+            "stat_boosts": [], "buff_turns": 0,
         }
 
     if isinstance(x, dict):
@@ -704,12 +759,15 @@ def ensure_ability_obj(x):
             "mana_cost": int(x.get("mana_cost", 0) or 0),
             "notes": x.get("notes", ""),
             "overcast": {"enabled": enabled, "scale": scale, "power": power, "cap": cap},
+            "stat_boosts": _normalize_stat_boosts(x.get("stat_boosts")),
+            "buff_turns": _safe_int(x.get("buff_turns"), 0),
         }
 
     return {
         "name": "", "favorite": False, "roll_type": "None",
         "damage": "", "mana_cost": 0, "notes": "",
-        "overcast": {"enabled": False, "scale": 0, "power": 0.85, "cap": 999}
+        "overcast": {"enabled": False, "scale": 0, "power": 0.85, "cap": 999},
+        "stat_boosts": [], "buff_turns": 0,
     }
 
 
@@ -1196,6 +1254,80 @@ def import_spell_from_library(spell_id: str) -> dict:
     return None
 
 
+# ---------------- Item Library ----------------
+
+ITEM_LIBRARY_PATH = Path("item_library.json")
+
+
+def load_item_library() -> dict:
+    if not ITEM_LIBRARY_PATH.exists():
+        return {"items": []}
+    try:
+        with open(ITEM_LIBRARY_PATH, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            if isinstance(data, dict) and "items" in data:
+                return data
+            return {"items": []}
+    except Exception:
+        return {"items": []}
+
+
+def save_item_library(library: dict) -> None:
+    try:
+        with open(ITEM_LIBRARY_PATH, 'w', encoding='utf-8') as f:
+            json.dump(library, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def add_item_to_library(item: dict, metadata: dict) -> str:
+    library = load_item_library()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    random_suffix = ''.join(random.choices('0123456789abcdef', k=6))
+    item_id = f"{timestamp}_{random_suffix}"
+    entry = {
+        "id": item_id,
+        "item": item.copy(),
+        "metadata": metadata.copy(),
+    }
+    library["items"].append(entry)
+    save_item_library(library)
+    return item_id
+
+
+def get_library_items(filters: dict = None) -> list:
+    library = load_item_library()
+    items = library.get("items", [])
+    if not filters:
+        return items
+    filtered = []
+    for entry in items:
+        metadata = entry.get("metadata", {})
+        if all(metadata.get(k) == v for k, v in filters.items()):
+            filtered.append(entry)
+    return filtered
+
+
+def remove_item_from_library(item_id: str) -> bool:
+    library = load_item_library()
+    items = library.get("items", [])
+    for i, entry in enumerate(items):
+        if entry.get("id") == item_id:
+            items.pop(i)
+            library["items"] = items
+            save_item_library(library)
+            return True
+    return False
+
+
+def import_item_from_library(item_id: str) -> dict:
+    library = load_item_library()
+    for entry in library.get("items", []):
+        if entry.get("id") == item_id:
+            return entry.get("item", {}).copy()
+    return None
+
+
 # ---------------- Spell Upgrade Functions ----------------
 
 def parse_damage_expr(expr: str) -> tuple:
@@ -1471,8 +1603,7 @@ class CharacterSheet(ttk.Frame):
         self.var_hp_max = tk.StringVar()
         self.var_mana_current = tk.StringVar()
         self.var_mana_max = tk.StringVar()
-        self.var_mana_density = tk.StringVar()
-        self.var_mana_density_mult = tk.StringVar()
+        self.var_mana_density_mult = tk.StringVar()  # display-only label for MD multiplier
         self.var_unspent = tk.StringVar()
 
         self.var_hp_dmg = tk.StringVar()
@@ -1491,11 +1622,17 @@ class CharacterSheet(ttk.Frame):
         self.var_outer_max = tk.StringVar()
 
         self.var_stats = {k: tk.StringVar() for k in STAT_KEYS}
+        self.var_equip_bonus = {k: tk.StringVar() for k in STAT_KEYS}  # display equipment boost text
+        self.var_equip_bonus_res = {"hp_max": tk.StringVar(), "mana_max": tk.StringVar()}
 
         self.var_growth_current = tk.StringVar()
         self.var_growth_max = tk.StringVar()
 
         self.var_show_used = tk.BooleanVar()
+
+        # Mana Stone currency (T1 through T15)
+        self.MAX_MANA_STONE_TIER = 15
+        self.var_mana_stones = {t: tk.StringVar(value="0") for t in range(1, 16)}
 
         # Inventory internal data (sub-tabs)
         self.inv_keys = ["equipment", "bag", "storage"]
@@ -1512,6 +1649,27 @@ class CharacterSheet(ttk.Frame):
             for k in self.inv_keys
         }
 
+        # Stat boost editor vars (per inventory category)
+        self.inv_boost_stat = {k: tk.StringVar(value=STAT_KEYS[0]) for k in self.inv_keys}
+        self.inv_boost_value = {k: tk.StringVar(value="0") for k in self.inv_keys}
+        self.inv_boost_mode = {k: tk.StringVar(value="flat") for k in self.inv_keys}
+        self.inv_boost_data = {k: [] for k in self.inv_keys}  # mirrors selected item's stat_boosts
+
+        # Consumable editor vars (per inventory category)
+        self.inv_consumable = {k: tk.BooleanVar(value=False) for k in self.inv_keys}
+        self.inv_consume_heal_hp = {k: tk.StringVar(value="0") for k in self.inv_keys}
+        self.inv_consume_heal_mana = {k: tk.StringVar(value="0") for k in self.inv_keys}
+        self.inv_consume_turns = {k: tk.StringVar(value="0") for k in self.inv_keys}
+        self.inv_consume_perm_stat = {k: tk.StringVar(value="") for k in self.inv_keys}
+        self.inv_consume_perm_value = {k: tk.StringVar(value="0") for k in self.inv_keys}
+
+        # Growth item flag (per inventory category)
+        self.inv_is_growth_item = {k: tk.BooleanVar(value=False) for k in self.inv_keys}
+
+        # Weight (per inventory category)
+        self.inv_weight = {k: tk.StringVar(value="0") for k in self.inv_keys}
+        self.var_carry_display = tk.StringVar(value="")
+        self.var_currency_display = tk.StringVar(value="")
 
         # Abilities
         self.ability_keys = ["core", "inner", "outer"]
@@ -1532,6 +1690,13 @@ class CharacterSheet(ttk.Frame):
             for s in self.ability_keys
         }
 
+        # Ability stat boost editor vars
+        self.ability_boost_stat = {k: tk.StringVar(value=BOOST_TARGETS[0]) for k in self.ability_keys}
+        self.ability_boost_value = {k: tk.StringVar(value="0") for k in self.ability_keys}
+        self.ability_boost_mode = {k: tk.StringVar(value="flat") for k in self.ability_keys}
+        self.ability_boost_data = {k: [] for k in self.ability_keys}
+        self.ability_buff_turns = {k: tk.StringVar(value="0") for k in self.ability_keys}
+
         # Combat (Overview quick use)
         self.combat_actions = []  # list of dicts {kind, ref, display, slot?}
         self.combat_selected_ref = None
@@ -1544,6 +1709,9 @@ class CharacterSheet(ttk.Frame):
         self.var_combat_mana_spend = tk.StringVar()
         self.var_combat_enemy_evasion = tk.StringVar()
         self.var_combat_result = tk.StringVar(value="")
+
+        # Active consumable buffs (runtime only, not saved)
+        self.active_buffs = []  # [{name, stat_boosts, turns_remaining}]
 
         # Track raw tk widgets that need manual theme styling
         self._tk_widgets = []  # list of tk.Text / tk.Listbox / tk.Canvas
@@ -1588,6 +1756,7 @@ class CharacterSheet(ttk.Frame):
         self.tab_battle_sim = ttk.Frame(self.tabs)
         self.tab_settings = ttk.Frame(self.tabs)
         self.tab_spell_library = ttk.Frame(self.tabs)
+        self.tab_item_library = ttk.Frame(self.tabs)
 
         self.tabs.add(self.tab_overview, text="Overview")
         self.tabs.add(self.tab_inventory, text="Inventory")
@@ -1599,6 +1768,7 @@ class CharacterSheet(ttk.Frame):
         self.tabs.add(self.tab_settings, text="Settings")
         if self.is_dm:
             self.tabs.add(self.tab_spell_library, text="Spell Library (DM)")
+            self.tabs.add(self.tab_item_library, text="Item Library (DM)")
 
         self._build_overview_tab()
         self._build_inventory_tab()
@@ -1609,10 +1779,44 @@ class CharacterSheet(ttk.Frame):
         self._build_battle_sim_tab()
         self._build_settings_tab()
         self._build_spell_library_tab()
+        self._build_item_library_tab()
 
     def _build_overview_tab(self):
-        left = ttk.Frame(self.tab_overview)
-        right = ttk.Frame(self.tab_overview)
+        # Scrollable wrapper for the overview tab
+        overview_canvas = tk.Canvas(self.tab_overview, highlightthickness=0)
+        overview_scrollbar = ttk.Scrollbar(self.tab_overview, orient="vertical", command=overview_canvas.yview)
+        overview_inner = ttk.Frame(overview_canvas)
+
+        overview_inner.bind(
+            "<Configure>",
+            lambda e: overview_canvas.configure(scrollregion=overview_canvas.bbox("all"))
+        )
+        self._overview_canvas_window = overview_canvas.create_window((0, 0), window=overview_inner, anchor="nw")
+        overview_canvas.configure(yscrollcommand=overview_scrollbar.set)
+
+        # Resize inner frame width to match canvas
+        def _on_overview_canvas_configure(event):
+            overview_canvas.itemconfig(self._overview_canvas_window, width=event.width)
+        overview_canvas.bind("<Configure>", _on_overview_canvas_configure)
+
+        # Mousewheel scrolling
+        def _on_mousewheel(event):
+            overview_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _bind_mousewheel(event):
+            overview_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        def _unbind_mousewheel(event):
+            overview_canvas.unbind_all("<MouseWheel>")
+
+        overview_canvas.bind("<Enter>", _bind_mousewheel)
+        overview_canvas.bind("<Leave>", _unbind_mousewheel)
+
+        overview_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        overview_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        left = ttk.Frame(overview_inner)
+        right = ttk.Frame(overview_inner)
         left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8), pady=8)
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=8)
 
@@ -1623,6 +1827,17 @@ class CharacterSheet(ttk.Frame):
         for row, (key, label) in enumerate(STAT_ORDER):
             ttk.Label(stats_frame, text=label + ":").grid(row=row, column=0, sticky="w", padx=4, pady=2)
             ttk.Entry(stats_frame, textvariable=self.var_stats[key], width=7).grid(row=row, column=1, sticky="w", padx=4, pady=2)
+            if key == "mana_density":
+                ttk.Label(stats_frame, textvariable=self.var_mana_density_mult, foreground="gray").grid(
+                    row=row, column=2, sticky="w", padx=(4, 0), pady=2)
+            ttk.Label(stats_frame, textvariable=self.var_equip_bonus[key],
+                      foreground="gray").grid(row=row, column=3, sticky="w", padx=(4, 0), pady=2)
+
+        # Currency summary
+        currency_frame = ttk.LabelFrame(left, text="Currency")
+        currency_frame.pack(fill=tk.X, pady=6)
+        ttk.Label(currency_frame, textvariable=self.var_currency_display, wraplength=250,
+                  justify="left").pack(padx=6, pady=6, anchor="w")
 
         # Resources
         res_frame = ttk.LabelFrame(left, text="Resources")
@@ -1632,10 +1847,15 @@ class CharacterSheet(ttk.Frame):
         ttk.Entry(res_frame, textvariable=self.var_hp_current, width=6).grid(row=0, column=1)
         ttk.Label(res_frame, text="/").grid(row=0, column=2)
         ttk.Entry(res_frame, textvariable=self.var_hp_max, width=6).grid(row=0, column=3)
+        ttk.Label(res_frame, textvariable=self.var_equip_bonus_res["hp_max"],
+                  foreground="gray").grid(row=0, column=4, sticky="w", padx=(4, 0), pady=3)
 
-        #ttk.Label(res_frame, text="Take dmg:").grid(row=1, column=0, sticky="w", padx=4, pady=3)
-        #ttk.Entry(res_frame, textvariable=self.var_hp_dmg, width=8).grid(row=1, column=1, sticky="w")
-        #ttk.Button(res_frame, text="Apply", command=self.apply_hp_damage).grid(row=1, column=3, sticky="w", padx=4)
+        ttk.Label(res_frame, text="Mana:").grid(row=1, column=0, sticky="w", padx=4, pady=3)
+        ttk.Entry(res_frame, textvariable=self.var_mana_current, width=6).grid(row=1, column=1)
+        ttk.Label(res_frame, text="/").grid(row=1, column=2)
+        ttk.Entry(res_frame, textvariable=self.var_mana_max, width=6).grid(row=1, column=3)
+        ttk.Label(res_frame, textvariable=self.var_equip_bonus_res["mana_max"],
+                  foreground="gray").grid(row=1, column=4, sticky="w", padx=(4, 0), pady=3)
 
         ttk.Label(res_frame, text="Heal:").grid(row=2, column=0, sticky="w", padx=4, pady=3)
         ttk.Entry(res_frame, textvariable=self.var_hp_heal, width=8).grid(row=2, column=1, sticky="w")
@@ -1658,24 +1878,15 @@ class CharacterSheet(ttk.Frame):
 
         ttk.Separator(res_frame, orient="horizontal").grid(row=7, column=0, columnspan=4, sticky="ew", padx=4, pady=6)
 
-        ttk.Label(res_frame, text="Mana:").grid(row=8, column=0, sticky="w", padx=4, pady=3)
-        ttk.Entry(res_frame, textvariable=self.var_mana_current, width=6).grid(row=8, column=1)
-        ttk.Label(res_frame, text="/").grid(row=8, column=2)
-        ttk.Entry(res_frame, textvariable=self.var_mana_max, width=6).grid(row=8, column=3)
-
-        ttk.Label(res_frame, text="Mana Density:").grid(row=9, column=0, sticky="w", padx=4, pady=3)
-        ttk.Entry(res_frame, textvariable=self.var_mana_density, width=6).grid(row=9, column=1)
-        ttk.Label(res_frame, textvariable=self.var_mana_density_mult, foreground="gray").grid(row=9, column=3, sticky="w", padx=4)
-
-        ttk.Label(res_frame, text="Unspent pts:").grid(row=10, column=0, sticky="w", padx=4, pady=3)
-        ttk.Entry(res_frame, textvariable=self.var_unspent, width=6).grid(row=10, column=1)
+        ttk.Label(res_frame, text="Unspent pts:").grid(row=8, column=0, sticky="w", padx=4, pady=3)
+        ttk.Entry(res_frame, textvariable=self.var_unspent, width=6).grid(row=8, column=1)
 
         ttk.Button(res_frame, text="Spend Points…", command=self.open_spend_points_popup).grid(
-            row=11, column=0, columnspan=4, sticky="ew", padx=4, pady=(8, 4)
+            row=9, column=0, columnspan=4, sticky="ew", padx=4, pady=(8, 4)
         )
 
         ttk.Button(res_frame, text="Long Rest (full HP/Mana)", command=self.apply_long_rest).grid(
-            row=12, column=0, columnspan=4, sticky="ew", padx=4, pady=(6, 4)
+            row=10, column=0, columnspan=4, sticky="ew", padx=4, pady=(6, 4)
         )
 
         # Combat quick use
@@ -1719,13 +1930,26 @@ class CharacterSheet(ttk.Frame):
         self.combat_mana_entry = ttk.Entry(c_right, textvariable=self.var_combat_mana_spend, width=10)
         self.combat_mana_entry.grid(row=5, column=1, sticky="w", padx=4, pady=2)
 
-        ttk.Button(c_right, text="Use / Cast", command=self.use_combat_action).grid(
-            row=6, column=0, columnspan=2, sticky="ew", padx=4, pady=(12, 6)
-        )
+        action_row = ttk.Frame(c_right)
+        action_row.grid(row=6, column=0, columnspan=2, sticky="ew", padx=4, pady=(12, 6))
+        ttk.Button(action_row, text="Use / Cast", command=self.use_combat_action).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(action_row, text="Consume", command=self.consume_combat_item).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
 
         ttk.Label(c_right, textvariable=self.var_combat_result, foreground="gray").grid(
             row=7, column=0, columnspan=2, sticky="w", padx=4, pady=(2, 2)
         )
+
+        # Active Buffs panel (shown only when consumable buffs with turns are active)
+        buff_frame = ttk.LabelFrame(c_right, text="Active Buffs")
+        buff_frame.grid(row=8, column=0, columnspan=2, sticky="ew", padx=4, pady=(6, 2))
+        self._buff_frame = buff_frame
+
+        self.active_buffs_list = tk.Listbox(buff_frame, height=4, exportselection=False)
+        self.active_buffs_list.pack(fill=tk.X, padx=6, pady=(4, 2))
+        self._tk_widgets.append(self.active_buffs_list)
+
+        ttk.Button(buff_frame, text="Remove Buff", command=self._remove_active_buff).pack(
+            anchor="w", padx=6, pady=(2, 6))
 
         for col in range(2):
             c_right.grid_columnconfigure(col, weight=1)
@@ -1750,7 +1974,7 @@ class CharacterSheet(ttk.Frame):
 
     def _clean_item_for_json(self, it: dict) -> dict:
         # Minimal canonical schema for items
-        return {
+        d = {
             "name": it.get("name", ""),
             "favorite": bool(it.get("favorite", False)),
             "roll_type": it.get("roll_type", "None"),
@@ -1759,12 +1983,31 @@ class CharacterSheet(ttk.Frame):
             "apply_bonus": bool(it.get("apply_bonus", it.get("apply_pbd", True))),
             "is_ranged": bool(it.get("is_ranged", False)),
         }
+        boosts = _normalize_stat_boosts(it.get("stat_boosts"))
+        if boosts:
+            d["stat_boosts"] = boosts
+        if it.get("consumable"):
+            d["consumable"] = True
+            d["consume_heal_hp"] = _safe_int(it.get("consume_heal_hp"), 0)
+            d["consume_heal_mana"] = _safe_int(it.get("consume_heal_mana"), 0)
+            d["consume_turns"] = _safe_int(it.get("consume_turns"), 0)
+            perm_stat = it.get("consume_perm_stat", "")
+            perm_val = _safe_int(it.get("consume_perm_value"), 0)
+            if perm_stat and perm_val:
+                d["consume_perm_stat"] = perm_stat
+                d["consume_perm_value"] = perm_val
+        if it.get("is_growth_item"):
+            d["is_growth_item"] = True
+        w = float(it.get("weight", 0) or 0)
+        if w:
+            d["weight"] = w
+        return d
 
     def _clean_ability_for_json(self, ab: dict) -> dict:
         over = ab.get("overcast", {})
         if not isinstance(over, dict):
             over = {}
-        return {
+        d = {
             "name": ab.get("name", ""),
             "favorite": bool(ab.get("favorite", False)),
             "roll_type": ab.get("roll_type", "None"),
@@ -1778,6 +2021,13 @@ class CharacterSheet(ttk.Frame):
                 "cap": int(over.get("cap", 999) or 999),
             },
         }
+        boosts = _normalize_stat_boosts(ab.get("stat_boosts"))
+        if boosts:
+            d["stat_boosts"] = boosts
+        bt = _safe_int(ab.get("buff_turns"), 0)
+        if bt > 0:
+            d["buff_turns"] = bt
+        return d
 
     def _serialize_char(self, char_obj) -> str:
         """Stable-ish snapshot for dirty checking."""
@@ -1893,12 +2143,20 @@ class CharacterSheet(ttk.Frame):
         frame = ttk.Frame(self.tab_inventory)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        growth_frame = ttk.LabelFrame(frame, text="Growth Items Bound")
-        growth_frame.pack(fill=tk.X, pady=(0, 10))
+        # Top bar: Growth Items + Carry Capacity side by side
+        top_bar = ttk.Frame(frame)
+        top_bar.pack(fill=tk.X, pady=(0, 10))
+
+        growth_frame = ttk.LabelFrame(top_bar, text="Growth Items Bound")
+        growth_frame.pack(side=tk.LEFT, padx=(0, 10))
 
         ttk.Entry(growth_frame, textvariable=self.var_growth_current, width=6).grid(row=0, column=0, padx=4, pady=6)
         ttk.Label(growth_frame, text="/").grid(row=0, column=1)
         ttk.Entry(growth_frame, textvariable=self.var_growth_max, width=6).grid(row=0, column=2, padx=4, pady=6)
+
+        carry_frame = ttk.LabelFrame(top_bar, text="Carry Capacity")
+        carry_frame.pack(side=tk.LEFT)
+        ttk.Label(carry_frame, textvariable=self.var_carry_display, font=("", 10)).pack(padx=6, pady=6)
 
         self.inv_tabs = ttk.Notebook(frame)
         self.inv_tabs.pack(fill=tk.BOTH, expand=True)
@@ -1907,6 +2165,213 @@ class CharacterSheet(ttk.Frame):
             f = ttk.Frame(self.inv_tabs)
             self.inv_tabs.add(f, text=label)
             self._build_inventory_category(f, key)
+
+        # Currency sub-tab
+        currency_frame = ttk.Frame(self.inv_tabs)
+        self.inv_tabs.add(currency_frame, text="Currency")
+        self._build_currency_tab(currency_frame)
+
+    def _build_currency_tab(self, parent):
+        outer = ttk.Frame(parent)
+        outer.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        ttk.Label(outer, text="Mana Stones", font=("TkDefaultFont", 12, "bold")).pack(anchor="w", pady=(0, 8))
+
+        # Current totals display
+        totals_frame = ttk.LabelFrame(outer, text="Current Holdings")
+        totals_frame.pack(fill=tk.X, pady=(0, 10))
+        self._currency_totals_label = ttk.Label(totals_frame, textvariable=self.var_currency_display,
+                                                 wraplength=500, justify="left")
+        self._currency_totals_label.pack(padx=10, pady=8, anchor="w")
+
+        # Add / Remove stones
+        add_frame = ttk.LabelFrame(outer, text="Add / Remove Mana Stones")
+        add_frame.pack(fill=tk.X, pady=(0, 10))
+
+        add_inner = ttk.Frame(add_frame)
+        add_inner.pack(fill=tk.X, padx=12, pady=10)
+
+        ttk.Label(add_inner, text="Tier:").pack(side=tk.LEFT, padx=(0, 4))
+        self._currency_tier_var = tk.StringVar(value="T1")
+        tier_values = [f"T{t}" for t in range(1, self.MAX_MANA_STONE_TIER + 1)]
+        ttk.Combobox(add_inner, textvariable=self._currency_tier_var,
+                     values=tier_values, state="readonly", width=6).pack(side=tk.LEFT, padx=(0, 12))
+
+        ttk.Label(add_inner, text="Amount:").pack(side=tk.LEFT, padx=(0, 4))
+        self._currency_amount_var = tk.StringVar(value="1")
+        ttk.Entry(add_inner, textvariable=self._currency_amount_var, width=8).pack(side=tk.LEFT, padx=(0, 12))
+
+        ttk.Button(add_inner, text="Add", command=self._currency_add).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(add_inner, text="Remove", command=self._currency_remove).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(add_inner, text="Set", command=self._currency_set).pack(side=tk.LEFT, padx=(0, 12))
+
+        self._currency_result_var = tk.StringVar(value="")
+        ttk.Label(add_inner, textvariable=self._currency_result_var, foreground="gray").pack(side=tk.LEFT, padx=(8, 0))
+
+        # Conversion section
+        conv_frame = ttk.LabelFrame(outer, text="Convert (100 lower = 1 higher)")
+        conv_frame.pack(fill=tk.X, pady=(0, 10))
+
+        conv_inner = ttk.Frame(conv_frame)
+        conv_inner.pack(fill=tk.X, padx=12, pady=10)
+
+        ttk.Label(conv_inner, text="Tier to upgrade:").pack(side=tk.LEFT, padx=(0, 4))
+        self._conv_tier_var = tk.StringVar(value="T1")
+        conv_tier_values = [f"T{t}" for t in range(1, self.MAX_MANA_STONE_TIER)]
+        self._conv_combo = ttk.Combobox(conv_inner, textvariable=self._conv_tier_var,
+                                        values=conv_tier_values, state="readonly", width=6)
+        self._conv_combo.pack(side=tk.LEFT, padx=(0, 12))
+
+        ttk.Label(conv_inner, text="Amount:").pack(side=tk.LEFT, padx=(0, 4))
+        self._conv_amount_var = tk.StringVar(value="1")
+        ttk.Entry(conv_inner, textvariable=self._conv_amount_var, width=6).pack(side=tk.LEFT, padx=(0, 12))
+
+        ttk.Button(conv_inner, text="Upgrade", command=self._convert_stones_up).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(conv_inner, text="Downgrade", command=self._convert_stones_down).pack(side=tk.LEFT, padx=(0, 8))
+
+        self._conv_result_var = tk.StringVar(value="")
+        ttk.Label(conv_inner, textvariable=self._conv_result_var, foreground="gray").pack(side=tk.LEFT, padx=(8, 0))
+
+        self._refresh_currency_display()
+
+    def _get_stone_count(self, tier: int) -> int:
+        try:
+            return max(0, int(self.var_mana_stones[tier].get().strip() or "0"))
+        except (ValueError, KeyError):
+            return 0
+
+    def _convert_stones_up(self):
+        """Convert 100 lower-tier stones into 1 higher-tier stone."""
+        tier_str = self._conv_tier_var.get()
+        try:
+            from_tier = int(tier_str.replace("T", "").replace("t", ""))
+        except ValueError:
+            self._conv_result_var.set("Invalid tier.")
+            return
+        to_tier = from_tier + 1
+        if to_tier > self.MAX_MANA_STONE_TIER:
+            self._conv_result_var.set("Already at max tier.")
+            return
+
+        try:
+            amount = max(1, int(self._conv_amount_var.get().strip() or "1"))
+        except ValueError:
+            amount = 1
+
+        have = self._get_stone_count(from_tier)
+        cost = amount * 100
+        if have < cost:
+            amount = have // 100
+            cost = amount * 100
+        if amount <= 0:
+            self._conv_result_var.set(f"Need at least 100 T{from_tier} MS to upgrade.")
+            return
+
+        self.var_mana_stones[from_tier].set(str(have - cost))
+        cur_high = self._get_stone_count(to_tier)
+        self.var_mana_stones[to_tier].set(str(cur_high + amount))
+        self._conv_result_var.set(f"Converted {cost} T{from_tier} → {amount} T{to_tier}")
+        self._refresh_currency_display()
+
+    def _convert_stones_down(self):
+        """Convert 1 higher-tier stone into 100 lower-tier stones."""
+        tier_str = self._conv_tier_var.get()
+        try:
+            from_tier = int(tier_str.replace("T", "").replace("t", ""))
+        except ValueError:
+            self._conv_result_var.set("Invalid tier.")
+            return
+        to_tier = from_tier + 1
+        if to_tier > self.MAX_MANA_STONE_TIER:
+            self._conv_result_var.set("Already at max tier.")
+            return
+
+        try:
+            amount = max(1, int(self._conv_amount_var.get().strip() or "1"))
+        except ValueError:
+            amount = 1
+
+        have_high = self._get_stone_count(to_tier)
+        if have_high < amount:
+            amount = have_high
+        if amount <= 0:
+            self._conv_result_var.set(f"No T{to_tier} MS to downgrade.")
+            return
+
+        self.var_mana_stones[to_tier].set(str(have_high - amount))
+        cur_low = self._get_stone_count(from_tier)
+        self.var_mana_stones[from_tier].set(str(cur_low + amount * 100))
+        self._conv_result_var.set(f"Converted {amount} T{to_tier} → {amount * 100} T{from_tier}")
+        self._refresh_currency_display()
+
+    def _currency_add(self):
+        """Add mana stones of a given tier."""
+        tier_str = self._currency_tier_var.get()
+        try:
+            tier = int(tier_str.replace("T", "").replace("t", ""))
+        except ValueError:
+            self._currency_result_var.set("Invalid tier.")
+            return
+        if tier < 1 or tier > self.MAX_MANA_STONE_TIER:
+            self._currency_result_var.set("Invalid tier.")
+            return
+        try:
+            amount = max(1, int(self._currency_amount_var.get().strip() or "1"))
+        except ValueError:
+            amount = 1
+        cur = self._get_stone_count(tier)
+        self.var_mana_stones[tier].set(str(cur + amount))
+        self._currency_result_var.set(f"Added {amount} T{tier} MS")
+        self._refresh_currency_display()
+
+    def _currency_remove(self):
+        """Remove mana stones of a given tier."""
+        tier_str = self._currency_tier_var.get()
+        try:
+            tier = int(tier_str.replace("T", "").replace("t", ""))
+        except ValueError:
+            self._currency_result_var.set("Invalid tier.")
+            return
+        if tier < 1 or tier > self.MAX_MANA_STONE_TIER:
+            self._currency_result_var.set("Invalid tier.")
+            return
+        try:
+            amount = max(1, int(self._currency_amount_var.get().strip() or "1"))
+        except ValueError:
+            amount = 1
+        cur = self._get_stone_count(tier)
+        removed = min(amount, cur)
+        self.var_mana_stones[tier].set(str(cur - removed))
+        self._currency_result_var.set(f"Removed {removed} T{tier} MS")
+        self._refresh_currency_display()
+
+    def _currency_set(self):
+        """Set mana stones of a given tier to an exact amount."""
+        tier_str = self._currency_tier_var.get()
+        try:
+            tier = int(tier_str.replace("T", "").replace("t", ""))
+        except ValueError:
+            self._currency_result_var.set("Invalid tier.")
+            return
+        if tier < 1 or tier > self.MAX_MANA_STONE_TIER:
+            self._currency_result_var.set("Invalid tier.")
+            return
+        try:
+            amount = max(0, int(self._currency_amount_var.get().strip() or "0"))
+        except ValueError:
+            amount = 0
+        self.var_mana_stones[tier].set(str(amount))
+        self._currency_result_var.set(f"Set T{tier} MS to {amount}")
+        self._refresh_currency_display()
+
+    def _refresh_currency_display(self):
+        """Update the currency summary label showing non-zero tiers."""
+        parts = []
+        for t in range(1, self.MAX_MANA_STONE_TIER + 1):
+            count = self._get_stone_count(t)
+            if count > 0:
+                parts.append(f"T{t}: {count}")
+        self.var_currency_display.set(", ".join(parts) if parts else "No mana stones")
 
     def _build_inventory_category(self, parent, key: str):
         outer = ttk.Frame(parent)
@@ -1943,26 +2408,86 @@ class CharacterSheet(ttk.Frame):
         ttk.Label(details, text="Damage dice (ex: 1d10+3):").grid(row=1, column=0, sticky="w", padx=6, pady=4)
         ttk.Entry(details, textvariable=self.inv_damage[key], width=28).grid(row=1, column=1, sticky="w", padx=6, pady=4)
 
+        ttk.Label(details, text="Weight (lbs):").grid(row=2, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(details, textvariable=self.inv_weight[key], width=10).grid(row=2, column=1, sticky="w", padx=6, pady=4)
+
         ttk.Checkbutton(details, text="Ranged item (use Precision)", variable=self.inv_is_ranged[key]).grid(
-            row=2, column=0, columnspan=2, sticky="w", padx=6, pady=(2, 2)
+            row=3, column=0, columnspan=2, sticky="w", padx=6, pady=(2, 2)
         )
 
         ttk.Checkbutton(details, text="Apply bonus (PBD melee / Precision ranged)", variable=self.inv_apply_bonus[key]).grid(
-            row=3, column=0, columnspan=2, sticky="w", padx=6, pady=(2, 6)
+            row=4, column=0, columnspan=2, sticky="w", padx=6, pady=(2, 2)
         )
 
-        ttk.Label(details, text="Notes:").grid(row=4, column=0, sticky="nw", padx=6, pady=4)
-        notes_box = tk.Text(details, wrap="word", height=10)
-        notes_box.grid(row=4, column=1, sticky="nsew", padx=6, pady=4)
+        ttk.Checkbutton(details, text="Growth Item", variable=self.inv_is_growth_item[key]).grid(
+            row=5, column=0, columnspan=2, sticky="w", padx=6, pady=(2, 6)
+        )
+
+        # ---- Passive Stat Boosts section ----
+        boost_frame = ttk.LabelFrame(details, text="Passive Stat Boosts (equipment only)")
+        boost_frame.grid(row=6, column=0, columnspan=2, sticky="ew", padx=6, pady=(2, 6))
+
+        boost_list = tk.Listbox(boost_frame, height=4, exportselection=False)
+        boost_list.pack(fill=tk.X, padx=6, pady=(6, 2))
+        setattr(self, f"inv_boost_list_{key}", boost_list)
+        self._tk_widgets.append(boost_list)
+
+        boost_controls = ttk.Frame(boost_frame)
+        boost_controls.pack(fill=tk.X, padx=6, pady=(2, 6))
+
+        stat_display_values = [lbl for _, lbl in BOOST_TARGET_LABELS]
+        boost_stat_combo = ttk.Combobox(boost_controls, values=stat_display_values,
+                                         textvariable=self.inv_boost_stat[key], state="readonly", width=16)
+        boost_stat_combo.pack(side=tk.LEFT, padx=(0, 4))
+        self.inv_boost_stat[key].set(stat_display_values[0])
+
+        ttk.Entry(boost_controls, textvariable=self.inv_boost_value[key], width=6).pack(side=tk.LEFT, padx=(0, 4))
+
+        ttk.Combobox(boost_controls, values=["flat", "percent"], textvariable=self.inv_boost_mode[key],
+                      state="readonly", width=8).pack(side=tk.LEFT, padx=(0, 4))
+
+        ttk.Button(boost_controls, text="+", width=3,
+                   command=lambda k=key: self.inv_boost_add(k)).pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Button(boost_controls, text="-", width=3,
+                   command=lambda k=key: self.inv_boost_remove(k)).pack(side=tk.LEFT)
+
+        # ---- Consumable section ----
+        cons_frame = ttk.LabelFrame(details, text="Consumable")
+        cons_frame.grid(row=7, column=0, columnspan=2, sticky="ew", padx=6, pady=(2, 6))
+
+        ttk.Checkbutton(cons_frame, text="Consumable (removed on use)",
+                         variable=self.inv_consumable[key]).grid(row=0, column=0, columnspan=4, sticky="w", padx=6, pady=(4, 2))
+
+        ttk.Label(cons_frame, text="Heal HP:").grid(row=1, column=0, sticky="w", padx=(6, 2), pady=2)
+        ttk.Entry(cons_frame, textvariable=self.inv_consume_heal_hp[key], width=6).grid(row=1, column=1, sticky="w", padx=(0, 8), pady=2)
+
+        ttk.Label(cons_frame, text="Heal Mana:").grid(row=1, column=2, sticky="w", padx=(0, 2), pady=2)
+        ttk.Entry(cons_frame, textvariable=self.inv_consume_heal_mana[key], width=6).grid(row=1, column=3, sticky="w", padx=(0, 6), pady=2)
+
+        ttk.Label(cons_frame, text="Buff turns (0=instant):").grid(row=2, column=0, columnspan=2, sticky="w", padx=(6, 2), pady=(2, 4))
+        ttk.Entry(cons_frame, textvariable=self.inv_consume_turns[key], width=6).grid(row=2, column=2, sticky="w", padx=(0, 6), pady=(2, 4))
+
+        ttk.Label(cons_frame, text="Perm stat:").grid(row=3, column=0, sticky="w", padx=(6, 2), pady=(2, 4))
+        perm_stat_values = ["(none)"] + [lbl for _, lbl in BOOST_TARGET_LABELS]
+        ttk.Combobox(cons_frame, values=perm_stat_values,
+                     textvariable=self.inv_consume_perm_stat[key], state="readonly", width=16).grid(
+            row=3, column=1, sticky="w", padx=(0, 8), pady=(2, 4))
+        ttk.Label(cons_frame, text="Value:").grid(row=3, column=2, sticky="w", padx=(0, 2), pady=(2, 4))
+        ttk.Entry(cons_frame, textvariable=self.inv_consume_perm_value[key], width=6).grid(
+            row=3, column=3, sticky="w", padx=(0, 6), pady=(2, 4))
+
+        ttk.Label(details, text="Notes:").grid(row=8, column=0, sticky="nw", padx=6, pady=4)
+        notes_box = tk.Text(details, wrap="word", height=4)
+        notes_box.grid(row=8, column=1, sticky="nsew", padx=6, pady=4)
         setattr(self, f"inv_notes_box_{key}", notes_box)
         self._tk_widgets.append(notes_box)
 
         ttk.Button(details, text="Update Selected", command=lambda k=key: self.inv_update_selected(k)).grid(
-            row=5, column=1, sticky="w", padx=6, pady=(6, 8)
+            row=9, column=1, sticky="w", padx=6, pady=(6, 8)
         )
 
         move_box = ttk.LabelFrame(details, text="Transfer")
-        move_box.grid(row=6, column=1, sticky="ew", padx=6, pady=(6, 8))
+        move_box.grid(row=10, column=1, sticky="ew", padx=6, pady=(6, 8))
 
         ttk.Label(move_box, text="Move to:").pack(side=tk.LEFT, padx=(6, 4), pady=6)
 
@@ -1981,13 +2506,15 @@ class CharacterSheet(ttk.Frame):
         ).pack(side=tk.LEFT, padx=(6, 6), pady=6)
 
         json_row = ttk.Frame(details)
-        json_row.grid(row=7, column=1, sticky="w", padx=6, pady=(0, 8))
+        json_row.grid(row=11, column=1, sticky="w", padx=6, pady=(0, 8))
 
         ttk.Button(json_row, text="Copy JSON", command=lambda k=key: self.inv_copy_json_selected(k)).pack(side=tk.LEFT)
         ttk.Button(json_row, text="Import JSON…", command=lambda k=key: self.inv_import_json_dialog(k)).pack(side=tk.LEFT, padx=8)
+        if self.is_dm:
+            ttk.Button(json_row, text="Save to Library", command=lambda k=key: self.item_library_save_selected(k)).pack(side=tk.LEFT, padx=8)
 
         details.grid_columnconfigure(1, weight=1)
-        details.grid_rowconfigure(4, weight=1)
+        details.grid_rowconfigure(8, weight=1)
 
     def _select_ref_in_listbox(self, lb: tk.Listbox, data_list: list, ref_obj):
         lb.selection_clear(0, tk.END)
@@ -2008,7 +2535,9 @@ class CharacterSheet(ttk.Frame):
         for it in self.inv_data[key]:
             star = "⭐ " if it.get("favorite", False) else ""
             rng = " (R)" if it.get("is_ranged", False) else ""
-            lb.insert(tk.END, f"{star}{it.get('name','')}{rng}")
+            cons = " [C]" if it.get("consumable", False) else ""
+            growth = " [G]" if it.get("is_growth_item", False) else ""
+            lb.insert(tk.END, f"{star}{it.get('name','')}{rng}{cons}{growth}")
 
         self._select_ref_in_listbox(lb, self.inv_data[key], selected_ref)
         self.refresh_combat_list()
@@ -2025,10 +2554,14 @@ class CharacterSheet(ttk.Frame):
             "notes": "",
             "apply_bonus": True,
             "apply_pbd": True,   # back-compat for damage_lab
-            "is_ranged": False
+            "is_ranged": False,
+            "stat_boosts": [],
+            "is_growth_item": False,
+            "weight": 0.0,
         })
         self.inv_new_name[key].set("")
         self.inv_render(key)
+        self._refresh_carry_display()
 
     def inv_remove(self, key: str):
         lb: tk.Listbox = getattr(self, f"inv_list_{key}")
@@ -2041,6 +2574,8 @@ class CharacterSheet(ttk.Frame):
                 if removed is self.inv_selected_ref.get(key):
                     self.inv_selected_ref[key] = None
         self.inv_render(key)
+        self._refresh_equipment_boosts_display()
+        self._recount_growth_items()
 
     def inv_toggle_favorite(self, key: str):
         lb: tk.Listbox = getattr(self, f"inv_list_{key}")
@@ -2071,6 +2606,29 @@ class CharacterSheet(ttk.Frame):
 
         self.inv_is_ranged[key].set(bool(it.get("is_ranged", False)))
 
+        # Load stat boosts for this item
+        self.inv_boost_data[key] = list(it.get("stat_boosts", []))
+        self.inv_boost_render(key)
+
+        # Load consumable fields
+        self.inv_consumable[key].set(bool(it.get("consumable", False)))
+        self.inv_consume_heal_hp[key].set(str(it.get("consume_heal_hp", 0)))
+        self.inv_consume_heal_mana[key].set(str(it.get("consume_heal_mana", 0)))
+        self.inv_consume_turns[key].set(str(it.get("consume_turns", 0)))
+
+        # Load perm stat consume fields
+        perm_stat_key = it.get("consume_perm_stat", "")
+        stat_label_map = dict(BOOST_TARGET_LABELS)
+        perm_display = stat_label_map.get(perm_stat_key, "(none)") if perm_stat_key else "(none)"
+        self.inv_consume_perm_stat[key].set(perm_display)
+        self.inv_consume_perm_value[key].set(str(_safe_int(it.get("consume_perm_value"), 0)))
+
+        # Load growth item flag
+        self.inv_is_growth_item[key].set(bool(it.get("is_growth_item", False)))
+
+        # Load weight
+        self.inv_weight[key].set(str(it.get("weight", 0)))
+
         notes_box: tk.Text = getattr(self, f"inv_notes_box_{key}")
         notes_box.delete("1.0", tk.END)
         notes_box.insert(tk.END, it.get("notes", ""))
@@ -2090,11 +2648,94 @@ class CharacterSheet(ttk.Frame):
 
         it["is_ranged"] = bool(self.inv_is_ranged[key].get())
 
+        # Save stat boosts
+        it["stat_boosts"] = list(self.inv_boost_data[key])
+
+        # Save consumable fields
+        it["consumable"] = bool(self.inv_consumable[key].get())
+        it["consume_heal_hp"] = _safe_int(self.inv_consume_heal_hp[key].get(), 0)
+        it["consume_heal_mana"] = _safe_int(self.inv_consume_heal_mana[key].get(), 0)
+        it["consume_turns"] = _safe_int(self.inv_consume_turns[key].get(), 0)
+
+        # Save perm stat consume fields
+        perm_display = self.inv_consume_perm_stat[key].get()
+        reverse_label_map = {lbl: k for k, lbl in BOOST_TARGET_LABELS}
+        it["consume_perm_stat"] = reverse_label_map.get(perm_display, "")
+        it["consume_perm_value"] = _safe_int(self.inv_consume_perm_value[key].get(), 0)
+
+        # Save growth item flag
+        it["is_growth_item"] = bool(self.inv_is_growth_item[key].get())
+
+        # Save weight
+        try:
+            it["weight"] = float(self.inv_weight[key].get() or 0)
+        except (ValueError, TypeError):
+            it["weight"] = 0.0
+
         notes_box: tk.Text = getattr(self, f"inv_notes_box_{key}")
         it["notes"] = notes_box.get("1.0", tk.END).rstrip("\n")
 
         self.inv_render(key)
-    
+        self._refresh_equipment_boosts_display()
+        self._recount_growth_items()
+        self._refresh_carry_display()
+
+    def inv_boost_render(self, key: str):
+        """Refresh the boost listbox for the given inventory category."""
+        lb: tk.Listbox = getattr(self, f"inv_boost_list_{key}")
+        lb.delete(0, tk.END)
+        stat_label_map = {k: lbl for k, lbl in BOOST_TARGET_LABELS}
+        for b in self.inv_boost_data[key]:
+            stat_name = stat_label_map.get(b["stat"], b["stat"])
+            if b["mode"] == "percent":
+                display = f"{stat_name}: {b['value']:+g}%"
+            else:
+                display = f"{stat_name}: {b['value']:+g}"
+            lb.insert(tk.END, display)
+
+    def inv_boost_add(self, key: str):
+        """Add a stat boost to the currently selected item."""
+        if self.inv_selected_ref.get(key) is None:
+            messagebox.showinfo("Boost", "Select an item first.")
+            return
+        # Map display label back to stat key
+        display_label = self.inv_boost_stat[key].get()
+        stat_key = None
+        for k, lbl in BOOST_TARGET_LABELS:
+            if lbl == display_label:
+                stat_key = k
+                break
+        if not stat_key:
+            return
+        try:
+            value = float(self.inv_boost_value[key].get().strip() or "0")
+        except ValueError:
+            return
+        if value == 0:
+            return
+        mode = self.inv_boost_mode[key].get() or "flat"
+        self.inv_boost_data[key].append({"stat": stat_key, "value": value, "mode": mode})
+        # Live-save to item dict
+        self.inv_selected_ref[key]["stat_boosts"] = list(self.inv_boost_data[key])
+        self.inv_boost_render(key)
+        self._refresh_equipment_boosts_display()
+
+    def inv_boost_remove(self, key: str):
+        """Remove the selected stat boost from the current item."""
+        lb: tk.Listbox = getattr(self, f"inv_boost_list_{key}")
+        sel = list(lb.curselection())
+        if not sel:
+            return
+        for idx in reversed(sel):
+            if 0 <= idx < len(self.inv_boost_data[key]):
+                self.inv_boost_data[key].pop(idx)
+        # Live-save to item dict
+        it = self.inv_selected_ref.get(key)
+        if it is not None:
+            it["stat_boosts"] = list(self.inv_boost_data[key])
+        self.inv_boost_render(key)
+        self._refresh_equipment_boosts_display()
+
     def inv_copy_json_selected(self, key: str):
         it = self.inv_selected_ref.get(key)
         if it is None:
@@ -2203,8 +2844,8 @@ class CharacterSheet(ttk.Frame):
 
         self.inv_render(from_key)
         self.inv_render(to_key)
-
-
+        self._refresh_equipment_boosts_display()
+        self._recount_growth_items()
 
     # ---------------- Abilities ----------------
 
@@ -2277,29 +2918,62 @@ class CharacterSheet(ttk.Frame):
         ttk.Label(details, text="Max bonus (cap):").grid(row=7, column=0, sticky="w", padx=6, pady=4)
         ttk.Entry(details, textvariable=self.ability_overcast_cap[key], width=10).grid(row=7, column=1, sticky="w", padx=6, pady=4)
 
-        ttk.Label(details, text="Notes:").grid(row=8, column=0, sticky="nw", padx=6, pady=4)
-        notes_box = tk.Text(details, wrap="word", height=10)
-        notes_box.grid(row=8, column=1, sticky="nsew", padx=6, pady=4)
+        # ---- Stat Boosts / Buff section ----
+        ttk.Separator(details, orient="horizontal").grid(row=8, column=0, columnspan=2, sticky="ew", padx=6, pady=(8, 8))
+
+        boost_frame = ttk.LabelFrame(details, text="Stat Boosts (buff / passive)")
+        boost_frame.grid(row=9, column=0, columnspan=2, sticky="ew", padx=6, pady=(2, 6))
+
+        ab_boost_list = tk.Listbox(boost_frame, height=4, exportselection=False)
+        ab_boost_list.pack(fill=tk.X, padx=6, pady=(6, 2))
+        setattr(self, f"ability_boost_list_{key}", ab_boost_list)
+        self._tk_widgets.append(ab_boost_list)
+
+        ab_boost_controls = ttk.Frame(boost_frame)
+        ab_boost_controls.pack(fill=tk.X, padx=6, pady=(2, 6))
+
+        stat_display_values = [lbl for _, lbl in BOOST_TARGET_LABELS]
+        ab_boost_combo = ttk.Combobox(ab_boost_controls, values=stat_display_values,
+                                       textvariable=self.ability_boost_stat[key], state="readonly", width=16)
+        ab_boost_combo.pack(side=tk.LEFT, padx=(0, 4))
+        self.ability_boost_stat[key].set(stat_display_values[0])
+
+        ttk.Entry(ab_boost_controls, textvariable=self.ability_boost_value[key], width=6).pack(side=tk.LEFT, padx=(0, 4))
+
+        ttk.Combobox(ab_boost_controls, values=["flat", "percent"], textvariable=self.ability_boost_mode[key],
+                      state="readonly", width=8).pack(side=tk.LEFT, padx=(0, 4))
+
+        ttk.Button(ab_boost_controls, text="+", width=3,
+                   command=lambda k=key: self.ability_boost_add(k)).pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Button(ab_boost_controls, text="-", width=3,
+                   command=lambda k=key: self.ability_boost_remove(k)).pack(side=tk.LEFT)
+
+        ttk.Label(details, text="Buff turns (0 = passive):").grid(row=10, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(details, textvariable=self.ability_buff_turns[key], width=10).grid(row=10, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(details, text="Notes:").grid(row=11, column=0, sticky="nw", padx=6, pady=4)
+        notes_box = tk.Text(details, wrap="word", height=6)
+        notes_box.grid(row=11, column=1, sticky="nsew", padx=6, pady=4)
         setattr(self, f"ability_notes_box_{key}", notes_box)
         self._tk_widgets.append(notes_box)
 
         ttk.Button(details, text="Update Selected", command=lambda k=key: self.ability_update_selected(k)).grid(
-            row=9, column=1, sticky="w", padx=6, pady=(6, 8)
+            row=12, column=1, sticky="w", padx=6, pady=(6, 8)
         )
 
         if self.is_dm:
             ttk.Button(details, text="Upgrade Spell", command=lambda k=key: self.spell_upgrade_dialog(k)).grid(
-                row=10, column=1, sticky="w", padx=6, pady=(0, 8)
+                row=13, column=1, sticky="w", padx=6, pady=(0, 8)
             )
 
         json_row = ttk.Frame(details)
-        json_row.grid(row=11, column=1, sticky="w", padx=6, pady=(0, 8))
+        json_row.grid(row=14, column=1, sticky="w", padx=6, pady=(0, 8))
 
         ttk.Button(json_row, text="Copy JSON", command=lambda s=key: self.ability_copy_json_selected(s)).pack(side=tk.LEFT)
         ttk.Button(json_row, text="Import JSON…", command=lambda s=key: self.ability_import_json_dialog(s)).pack(side=tk.LEFT, padx=8)
 
         move_box = ttk.LabelFrame(details, text="Transfer")
-        move_box.grid(row=12, column=1, sticky="ew", padx=6, pady=(6, 8))
+        move_box.grid(row=15, column=1, sticky="ew", padx=6, pady=(6, 8))
 
         ttk.Label(move_box, text="Move to:").pack(side=tk.LEFT, padx=(6, 4), pady=6)
 
@@ -2318,7 +2992,7 @@ class CharacterSheet(ttk.Frame):
         ).pack(side=tk.LEFT, padx=(6, 6), pady=6)
 
         details.grid_columnconfigure(1, weight=1)
-        details.grid_rowconfigure(8, weight=1)
+        details.grid_rowconfigure(11, weight=1)
 
     def ability_render(self, key: str):
         selected_ref = self.ability_selected_ref.get(key)
@@ -2328,7 +3002,12 @@ class CharacterSheet(ttk.Frame):
         lb.delete(0, tk.END)
         for ab in self.abilities_data[key]:
             star = "⭐ " if ab.get("favorite", False) else ""
-            lb.insert(tk.END, f"{star}{ab.get('name','')}")
+            ab_boosts = ab.get("stat_boosts", [])
+            ab_bt = _safe_int(ab.get("buff_turns"), 0)
+            marker = ""
+            if ab_boosts:
+                marker = " [P]" if ab_bt == 0 else " [B]"
+            lb.insert(tk.END, f"{star}{ab.get('name','')}{marker}")
 
         self._select_ref_in_listbox(lb, self.abilities_data[key], selected_ref)
         self.refresh_combat_list()
@@ -2388,6 +3067,11 @@ class CharacterSheet(ttk.Frame):
         notes_box.delete("1.0", tk.END)
         notes_box.insert(tk.END, ab.get("notes", ""))
 
+        # Load stat boosts and buff turns
+        self.ability_boost_data[key] = list(ab.get("stat_boosts", []))
+        self.ability_boost_render(key)
+        self.ability_buff_turns[key].set(str(_safe_int(ab.get("buff_turns"), 0)))
+
     def ability_update_selected(self, key: str):
         ab = self.ability_selected_ref.get(key)
         if ab is None:
@@ -2425,7 +3109,68 @@ class CharacterSheet(ttk.Frame):
         notes_box: tk.Text = getattr(self, f"ability_notes_box_{key}")
         ab["notes"] = notes_box.get("1.0", tk.END).rstrip("\n")
 
+        # Save stat boosts and buff turns
+        ab["stat_boosts"] = list(self.ability_boost_data[key])
+        ab["buff_turns"] = _safe_int(self.ability_buff_turns[key].get(), 0)
+
         self.ability_render(key)
+        self._refresh_equipment_boosts_display()
+
+    # ---- Ability stat boost editor ----
+
+    def ability_boost_render(self, key: str):
+        """Refresh the boost listbox for the given ability category."""
+        lb: tk.Listbox = getattr(self, f"ability_boost_list_{key}")
+        lb.delete(0, tk.END)
+        stat_label_map = {k: lbl for k, lbl in BOOST_TARGET_LABELS}
+        for b in self.ability_boost_data[key]:
+            stat_name = stat_label_map.get(b["stat"], b["stat"])
+            if b["mode"] == "percent":
+                display = f"{stat_name}: {b['value']:+g}%"
+            else:
+                display = f"{stat_name}: {b['value']:+g}"
+            lb.insert(tk.END, display)
+
+    def ability_boost_add(self, key: str):
+        """Add a stat boost to the currently selected ability."""
+        if self.ability_selected_ref.get(key) is None:
+            messagebox.showinfo("Boost", "Select an ability first.")
+            return
+        display_label = self.ability_boost_stat[key].get()
+        stat_key = None
+        for k, lbl in BOOST_TARGET_LABELS:
+            if lbl == display_label:
+                stat_key = k
+                break
+        if not stat_key:
+            return
+        try:
+            value = float(self.ability_boost_value[key].get().strip() or "0")
+        except ValueError:
+            return
+        if value == 0:
+            return
+        mode = self.ability_boost_mode[key].get() or "flat"
+        self.ability_boost_data[key].append({"stat": stat_key, "value": value, "mode": mode})
+        self.ability_selected_ref[key]["stat_boosts"] = list(self.ability_boost_data[key])
+        self.ability_boost_render(key)
+        self._refresh_equipment_boosts_display()
+
+    def ability_boost_remove(self, key: str):
+        """Remove the selected stat boost from the current ability."""
+        lb: tk.Listbox = getattr(self, f"ability_boost_list_{key}")
+        sel = list(lb.curselection())
+        if not sel:
+            return
+        for idx in reversed(sel):
+            if 0 <= idx < len(self.ability_boost_data[key]):
+                self.ability_boost_data[key].pop(idx)
+        ab = self.ability_selected_ref.get(key)
+        if ab is not None:
+            ab["stat_boosts"] = list(self.ability_boost_data[key])
+        self.ability_boost_render(key)
+        self._refresh_equipment_boosts_display()
+
     def ability_copy_json_selected(self, slot: str):
         ab = self.ability_selected_ref.get(slot)
         if ab is None:
@@ -2635,12 +3380,9 @@ class CharacterSheet(ttk.Frame):
 
             # Get character context
             tier = self.var_tier.get() or "T1"
-            try:
-                mana_density = int(self.var_mana_density.get() or "0")
-            except ValueError:
-                mana_density = 0
+            mana_density = self._get_effective_stat("mana_density")
 
-            char_stats = {k: int(self.var_stats[k].get() or "0") for k in STAT_KEYS}
+            char_stats = {k: self._get_effective_stat(k) for k in STAT_KEYS}
 
             # Generate spells (with Ollama if available)
             nonlocal generated_spells
@@ -3186,20 +3928,14 @@ class CharacterSheet(ttk.Frame):
         return self.combat_actions
 
     def _damage_lab_get_pbd(self):
-        try:
-            return int(self.var_stats["pbd"].get().strip() or "0")
-        except (ValueError, KeyError):
-            return 0
+        return self._get_effective_stat("pbd")
 
     def _damage_lab_get_precision(self):
-        try:
-            return int(self.var_stats["precision"].get().strip() or "0")
-        except (ValueError, KeyError):
-            return 0
+        return self._get_effective_stat("precision")
 
     def _damage_lab_get_mana_density(self):
         try:
-            return int(self.var_mana_density.get().strip() or "0")
+            return self._get_effective_stat("mana_density")
         except ValueError:
             return 0
 
@@ -3219,18 +3955,15 @@ class CharacterSheet(ttk.Frame):
             char = {
                 "name": self.var_name.get() or "Character A",
                 "stats": {},
-                "hp_max": int(self.var_hp_max.get().strip() or "20"),
+                "hp_max": self._get_effective_hp_max(),
                 "hp_current": int(self.var_hp_current.get().strip() or "20"),
-                "mana_max": int(self.var_mana_max.get().strip() or "10"),
+                "mana_max": self._get_effective_mana_max(),
                 "mana_current": int(self.var_mana_current.get().strip() or "10"),
-                "mana_density": int(self.var_mana_density.get().strip() or "0"),
+                "mana_density": self._get_effective_stat("mana_density"),
                 "actions": [],
             }
             for k in STAT_KEYS:
-                try:
-                    char["stats"][k] = int(self.var_stats[k].get().strip() or "0")
-                except (ValueError, KeyError):
-                    char["stats"][k] = 0
+                char["stats"][k] = self._get_effective_stat(k)
 
             # Build actions from equipment + abilities
             self.refresh_combat_list()
@@ -3462,6 +4195,223 @@ class CharacterSheet(ttk.Frame):
         ttk.Button(btn_frame, text="Import", command=do_import).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Cancel", command=win.destroy).pack(side=tk.LEFT, padx=5)
 
+    # ---------------- Item Library Tab ----------------
+
+    def _build_item_library_tab(self):
+        """Build the Item Library tab (DM tool)."""
+        frame = ttk.Frame(self.tab_item_library)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Left panel: item list
+        left = ttk.Frame(frame)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+
+        ttk.Label(left, text="Item Library", font=("TkDefaultFont", 12, "bold")).pack(anchor="w", pady=(0, 5))
+
+        self.item_library_listbox = tk.Listbox(left, height=20, exportselection=False)
+        self.item_library_listbox.pack(fill=tk.BOTH, expand=True)
+        self.item_library_listbox.bind("<<ListboxSelect>>", lambda _: self.item_library_on_select())
+        self._tk_widgets.append(self.item_library_listbox)
+
+        btn_frame = ttk.Frame(left)
+        btn_frame.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(btn_frame, text="Refresh", command=self.item_library_render).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(btn_frame, text="Delete Selected", command=self.item_library_delete).pack(side=tk.LEFT)
+
+        # Right panel: item details
+        right = ttk.Frame(frame)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        details = ttk.LabelFrame(right, text="Item Details")
+        details.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(details, text="Name:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        self.lib_item_name = tk.StringVar()
+        ttk.Entry(details, textvariable=self.lib_item_name, state="readonly", width=40).grid(row=0, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(details, text="Roll Type:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        self.lib_item_roll_type = tk.StringVar()
+        ttk.Entry(details, textvariable=self.lib_item_roll_type, state="readonly", width=15).grid(row=1, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(details, text="Damage:").grid(row=2, column=0, sticky="w", padx=6, pady=4)
+        self.lib_item_damage = tk.StringVar()
+        ttk.Entry(details, textvariable=self.lib_item_damage, state="readonly", width=20).grid(row=2, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(details, text="Type:").grid(row=3, column=0, sticky="w", padx=6, pady=4)
+        self.lib_item_type = tk.StringVar()
+        ttk.Entry(details, textvariable=self.lib_item_type, state="readonly", width=20).grid(row=3, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(details, text="Stat Boosts:").grid(row=4, column=0, sticky="w", padx=6, pady=4)
+        self.lib_item_boosts = tk.StringVar()
+        ttk.Entry(details, textvariable=self.lib_item_boosts, state="readonly", width=40).grid(row=4, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Separator(details, orient="horizontal").grid(row=5, column=0, columnspan=2, sticky="ew", padx=6, pady=8)
+
+        ttk.Label(details, text="Source Character:").grid(row=6, column=0, sticky="w", padx=6, pady=4)
+        self.lib_item_source = tk.StringVar()
+        ttk.Entry(details, textvariable=self.lib_item_source, state="readonly", width=30).grid(row=6, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(details, text="Category:").grid(row=7, column=0, sticky="w", padx=6, pady=4)
+        self.lib_item_category = tk.StringVar()
+        ttk.Entry(details, textvariable=self.lib_item_category, state="readonly", width=20).grid(row=7, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(details, text="Notes:").grid(row=8, column=0, sticky="nw", padx=6, pady=4)
+        self.lib_item_notes = tk.Text(details, wrap="word", height=6, state="disabled")
+        self.lib_item_notes.grid(row=8, column=1, sticky="nsew", padx=6, pady=4)
+        self._tk_widgets.append(self.lib_item_notes)
+
+        ttk.Button(details, text="Import to Character", command=self.item_library_import).grid(row=9, column=1, sticky="w", padx=6, pady=(8, 8))
+
+        details.grid_rowconfigure(8, weight=1)
+        details.grid_columnconfigure(1, weight=1)
+
+        self.item_library_selected_id = None
+        self.item_library_render()
+
+    def item_library_render(self):
+        """Refresh the item library list."""
+        items = get_library_items()
+        self.item_library_listbox.delete(0, tk.END)
+        if not items:
+            self.item_library_listbox.insert(tk.END, "(No items in library)")
+            return
+        for entry in items:
+            item = entry.get("item", {})
+            metadata = entry.get("metadata", {})
+            name = item.get("name", "Unknown")
+            cat = metadata.get("category", "?")
+            rng = "Ranged" if item.get("is_ranged") else "Melee"
+            cons = " [C]" if item.get("consumable") else ""
+            display = f"{name} ({rng}{cons}) - {cat}"
+            self.item_library_listbox.insert(tk.END, display)
+
+    def item_library_on_select(self):
+        """Handle item library selection."""
+        sel = list(self.item_library_listbox.curselection())
+        if len(sel) != 1:
+            return
+        idx = sel[0]
+        items = get_library_items()
+        if idx >= len(items):
+            return
+        entry = items[idx]
+        item = entry.get("item", {})
+        metadata = entry.get("metadata", {})
+
+        self.item_library_selected_id = entry.get("id")
+
+        self.lib_item_name.set(item.get("name", ""))
+        self.lib_item_roll_type.set(item.get("roll_type", "None"))
+        self.lib_item_damage.set(item.get("damage", ""))
+
+        parts = []
+        if item.get("is_ranged"):
+            parts.append("Ranged")
+        else:
+            parts.append("Melee")
+        if item.get("consumable"):
+            parts.append("Consumable")
+            hp_h = _safe_int(item.get("consume_heal_hp"), 0)
+            mana_h = _safe_int(item.get("consume_heal_mana"), 0)
+            turns = _safe_int(item.get("consume_turns"), 0)
+            if hp_h:
+                parts.append(f"HP+{hp_h}")
+            if mana_h:
+                parts.append(f"Mana+{mana_h}")
+            if turns:
+                parts.append(f"{turns} turns")
+        self.lib_item_type.set(", ".join(parts))
+
+        stat_label_map = {k: lbl for k, lbl in BOOST_TARGET_LABELS}
+        boost_strs = []
+        for b in item.get("stat_boosts", []):
+            sn = stat_label_map.get(b.get("stat", ""), b.get("stat", ""))
+            if b.get("mode") == "percent":
+                boost_strs.append(f"{sn} {b.get('value', 0):+g}%")
+            else:
+                boost_strs.append(f"{sn} {b.get('value', 0):+g}")
+        self.lib_item_boosts.set(", ".join(boost_strs) if boost_strs else "None")
+
+        self.lib_item_source.set(metadata.get("source_character", "Unknown"))
+        self.lib_item_category.set(metadata.get("category", "?"))
+
+        self.lib_item_notes.config(state="normal")
+        self.lib_item_notes.delete("1.0", tk.END)
+        self.lib_item_notes.insert("1.0", item.get("notes", ""))
+        self.lib_item_notes.config(state="disabled")
+
+    def item_library_delete(self):
+        """Delete selected item from library."""
+        if not self.item_library_selected_id:
+            messagebox.showinfo("Delete", "Select an item first.")
+            return
+        items = get_library_items()
+        entry = next((e for e in items if e.get("id") == self.item_library_selected_id), None)
+        if not entry:
+            messagebox.showerror("Error", "Item not found.")
+            return
+        item_name = entry.get("item", {}).get("name", "Unknown")
+        if messagebox.askyesno("Confirm Delete", f"Delete '{item_name}' from library?"):
+            if remove_item_from_library(self.item_library_selected_id):
+                self.item_library_selected_id = None
+                self.item_library_render()
+                messagebox.showinfo("Deleted", f"Removed '{item_name}' from library.")
+            else:
+                messagebox.showerror("Error", "Failed to delete item.")
+
+    def item_library_import(self):
+        """Import selected library item to character inventory."""
+        if not self.item_library_selected_id:
+            messagebox.showinfo("Import", "Select an item first.")
+            return
+        item = import_item_from_library(self.item_library_selected_id)
+        if not item:
+            messagebox.showerror("Error", "Item not found.")
+            return
+
+        win = tk.Toplevel(self.winfo_toplevel())
+        win.title("Import Item")
+        win.geometry("300x150")
+        win.transient(self)
+        win.grab_set()
+        colors = self._get_current_colors()
+        style_toplevel(win, colors)
+
+        ttk.Label(win, text=f"Import '{item.get('name', '')}' to:", font=("TkDefaultFont", 10)).pack(pady=15)
+
+        cat_var = tk.StringVar(value="equipment")
+        ttk.Radiobutton(win, text="Equipment", variable=cat_var, value="equipment").pack(anchor="w", padx=40)
+        ttk.Radiobutton(win, text="Bag", variable=cat_var, value="bag").pack(anchor="w", padx=40)
+        ttk.Radiobutton(win, text="Storage", variable=cat_var, value="storage").pack(anchor="w", padx=40)
+
+        def do_import():
+            category = cat_var.get()
+            self.inv_data[category].append(ensure_item_obj(item))
+            self.inv_render(category)
+            self._refresh_equipment_boosts_display()
+            win.destroy()
+            messagebox.showinfo("Imported", f"Added '{item.get('name', '')}' to {category}.")
+
+        btn_frame = ttk.Frame(win)
+        btn_frame.pack(pady=15)
+        ttk.Button(btn_frame, text="Import", command=do_import).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=win.destroy).pack(side=tk.LEFT, padx=5)
+
+    def item_library_save_selected(self, inv_key: str):
+        """Save the currently selected inventory item to the item library."""
+        it = self.inv_selected_ref.get(inv_key)
+        if it is None:
+            messagebox.showinfo("Library", "Select an item first.")
+            return
+        item_data = self._clean_item_for_json(it)
+        metadata = {
+            "date_created": datetime.now().isoformat(),
+            "source_character": self.var_name.get() or "Unknown",
+            "category": inv_key,
+        }
+        add_item_to_library(item_data, metadata)
+        messagebox.showinfo("Library", f"Saved '{item_data.get('name', '')}' to item library.")
+
     # ---------------- Combat Quick Use ----------------
 
     def refresh_combat_list(self):
@@ -3478,18 +4428,23 @@ class CharacterSheet(ttk.Frame):
                 "ref": it,
                 "favorite": bool(it.get("favorite", False)),
                 "name": it.get("name", ""),
-                "display": f"{'⭐ ' if it.get('favorite', False) else ''}{it.get('name','')}  (Item:{rng})",
+                "display": f"{'⭐ ' if it.get('favorite', False) else ''}{it.get('name','')}  (Item:{rng}{'|Consumable' if it.get('consumable') else ''}{'|Growth' if it.get('is_growth_item') else ''})",
             })
 
         for slot in ["core", "inner", "outer"]:
             for ab in self.abilities_data.get(slot, []):
+                ab_boosts = ab.get("stat_boosts", [])
+                ab_bt = _safe_int(ab.get("buff_turns"), 0)
+                tag = ""
+                if ab_boosts:
+                    tag = "|Passive" if ab_bt == 0 else "|Buff"
                 actions.append({
                     "kind": "ability",
                     "slot": slot,
                     "ref": ab,
                     "favorite": bool(ab.get("favorite", False)),
                     "name": ab.get("name", ""),
-                    "display": f"{'⭐ ' if ab.get('favorite', False) else ''}{ab.get('name','')}  (Ability:{slot})",
+                    "display": f"{'⭐ ' if ab.get('favorite', False) else ''}{ab.get('name','')}  (Ability:{slot}{tag})",
                 })
 
         actions = sorted(actions, key=lambda a: (not a["favorite"], a["name"].lower(), a["kind"], a.get("slot") or ""))
@@ -3572,10 +4527,7 @@ class CharacterSheet(ttk.Frame):
         else:
             acc_key, acc_label = "melee_acc", "Melee Acc"
 
-        try:
-            acc_val = int(self.var_stats[acc_key].get().strip() or "0")
-        except Exception:
-            acc_val = 0
+        acc_val = self._get_effective_stat(acc_key)
 
         roll_mult = hit_roll_multiplier(d20)
         effective_acc = acc_val * roll_mult
@@ -3634,10 +4586,7 @@ class CharacterSheet(ttk.Frame):
             else:
                 acc_key, acc_label = "melee_acc", "Melee Acc"
 
-            try:
-                acc_val = int(self.var_stats[acc_key].get().strip() or "0")
-            except Exception:
-                acc_val = 0
+            acc_val = self._get_effective_stat(acc_key)
 
             roll_mult = hit_roll_multiplier(d20)
             effective_acc = acc_val * roll_mult
@@ -3663,6 +4612,54 @@ class CharacterSheet(ttk.Frame):
                 glance_info = f" * Glancing {pct}%"
             except ValueError:
                 pass
+
+        # -------- Early return for passive / buff-only abilities (no damage needed) --------
+        if chosen["kind"] == "ability":
+            ab_boosts_early = ref.get("stat_boosts", [])
+            ab_bt_early = _safe_int(ref.get("buff_turns"), 0)
+            has_dmg_early = bool((ref.get("damage", "") or "").strip())
+            base_cost_early = int(ref.get("mana_cost", 0) or 0)
+
+            # Pure passive — always active
+            if base_cost_early <= 0 and ab_boosts_early and ab_bt_early == 0 and not has_dmg_early:
+                messagebox.showinfo("Combat", "This is a passive ability — its effects are always active.")
+                return
+
+            if base_cost_early <= 0 and not has_dmg_early:
+                messagebox.showwarning("Combat", "This ability has no mana_cost or damage set.")
+                return
+
+            # Buff-only spell (no damage) — spend mana, apply buff, skip damage
+            if not has_dmg_early and ab_boosts_early and ab_bt_early > 0 and base_cost_early > 0:
+                slot_e = chosen.get("slot", "inner")
+                mana_mult_e = float(ABILITY_MODS.get(slot_e, {"mana": 1.0})["mana"])
+                try:
+                    spend_base_e = int((self.var_combat_mana_spend.get().strip() or str(base_cost_early)).strip())
+                except ValueError:
+                    spend_base_e = base_cost_early
+                if spend_base_e < base_cost_early:
+                    messagebox.showwarning("Combat", f"Not enough mana allocated. Base cost is {base_cost_early}.")
+                    return
+                spent_eff_e = int(math.ceil(spend_base_e * mana_mult_e))
+                try:
+                    cur_mana_e = int(self.var_mana_current.get())
+                except ValueError:
+                    cur_mana_e = 0
+                if spent_eff_e > cur_mana_e:
+                    messagebox.showwarning("Combat", f"Not enough mana. You have {cur_mana_e}, need {spent_eff_e} (slot-adjusted).")
+                    return
+                self.var_mana_current.set(str(cur_mana_e - spent_eff_e))
+                self.active_buffs.append({
+                    "name": ref.get("name", "spell"),
+                    "stat_boosts": list(ab_boosts_early),
+                    "turns_remaining": ab_bt_early,
+                })
+                self._render_active_buffs()
+                self._refresh_equipment_boosts_display()
+                self.var_combat_result.set(
+                    f"Cast {ref.get('name','spell')}: buff applied for {ab_bt_early} turns. Mana spent: {spent_eff_e}."
+                )
+                return
 
         # -------- Damage calculation --------
         try:
@@ -3697,16 +4694,10 @@ class CharacterSheet(ttk.Frame):
                 return
 
             if is_ranged:
-                try:
-                    pts = int(self.var_stats["precision"].get().strip() or "0")
-                except Exception:
-                    pts = 0
+                pts = self._get_effective_stat("precision")
                 label = "Precision"
             else:
-                try:
-                    pts = int(self.var_stats["pbd"].get().strip() or "0")
-                except Exception:
-                    pts = 0
+                pts = self._get_effective_stat("pbd")
                 label = "PBD"
 
             mult = mana_density_multiplier(pts)
@@ -3724,10 +4715,14 @@ class CharacterSheet(ttk.Frame):
             return
 
         # -------- Abilities: slot multipliers + overcast + mana density --------
+        # (Passive and buff-only spells already handled above before damage parsing)
         slot = chosen.get("slot", "inner")
         mods = ABILITY_MODS.get(slot, {"dmg": 1.0, "mana": 1.0})
         dmg_mult = float(mods["dmg"])
         mana_mult = float(mods["mana"])
+
+        ab_boosts = ref.get("stat_boosts", [])
+        ab_buff_turns = _safe_int(ref.get("buff_turns"), 0)
 
         base_cost = int(ref.get("mana_cost", 0) or 0)
         if base_cost <= 0:
@@ -3755,10 +4750,7 @@ class CharacterSheet(ttk.Frame):
             messagebox.showwarning("Combat", f"Not enough mana. You have {cur_mana}, need {spent_eff} (slot-adjusted).")
             return
 
-        try:
-            md_pts = int(self.var_mana_density.get().strip() or "0")
-        except ValueError:
-            md_pts = 0
+        md_pts = self._get_effective_stat("mana_density")
         md_mult = mana_density_multiplier(md_pts)
 
         over_bonus = compute_overcast_bonus(base_eff, spent_eff, ref.get("overcast", {}))
@@ -3767,6 +4759,18 @@ class CharacterSheet(ttk.Frame):
 
         self.var_mana_current.set(str(cur_mana - spent_eff))
 
+        # Case B/D: Apply temporary buff if ability has one
+        buff_note = ""
+        if ab_boosts and ab_buff_turns > 0:
+            self.active_buffs.append({
+                "name": ref.get("name", "spell"),
+                "stat_boosts": list(ab_boosts),
+                "turns_remaining": ab_buff_turns,
+            })
+            self._render_active_buffs()
+            self._refresh_equipment_boosts_display()
+            buff_note = f" | Buff applied ({ab_buff_turns} turns)"
+
         spend_ratio = spent_eff / base_eff if base_eff > 0 else 1.0
         result = (
             f"{hit_info}{slot.title()} ability: base {base} (rolled {rolled} + flat {flat_bonus}), "
@@ -3774,10 +4778,141 @@ class CharacterSheet(ttk.Frame):
             f"*{dmg_mult:.2f} slot *{md_mult:.2f} mana density"
         )
         if glance_info:
-            result += f"{glance_info} → {final_total}. Mana spent: {spent_eff}."
+            result += f"{glance_info} → {final_total}. Mana spent: {spent_eff}.{buff_note}"
         else:
-            result += f" → {raw_total}. Mana spent: {spent_eff}."
+            result += f" → {raw_total}. Mana spent: {spent_eff}.{buff_note}"
         self.var_combat_result.set(result)
+
+    # ---------------- Consumables / Active Buffs ----------------
+
+    def consume_combat_item(self):
+        """Consume the selected equipment item from the combat quick-use list."""
+        if self.combat_selected_ref is None or self.combat_selected_kind != "item":
+            messagebox.showinfo("Consume", "Select a consumable equipment item first.")
+            return
+
+        chosen = None
+        for a in self.combat_actions:
+            if a["ref"] is self.combat_selected_ref and a["kind"] == "item":
+                chosen = a
+                break
+        if chosen is None:
+            messagebox.showinfo("Consume", "Selection is out of date. Hit Refresh list and re-select.")
+            return
+
+        ref = chosen["ref"]
+        if not ref.get("consumable", False):
+            messagebox.showinfo("Consume", "This item is not marked as consumable.")
+            return
+
+        results = []
+        name = ref.get("name", "item")
+
+        # Instant HP heal
+        heal_hp = _safe_int(ref.get("consume_heal_hp"), 0)
+        if heal_hp > 0:
+            try:
+                cur = int(self.var_hp_current.get())
+            except ValueError:
+                cur = 0
+            mx = self._get_effective_hp_max()
+            new_hp = max(0, min(mx, cur + heal_hp))
+            self.var_hp_current.set(str(new_hp))
+            results.append(f"HP +{new_hp - cur}")
+
+        # Instant Mana heal
+        heal_mana = _safe_int(ref.get("consume_heal_mana"), 0)
+        if heal_mana > 0:
+            try:
+                cur = int(self.var_mana_current.get())
+            except ValueError:
+                cur = 0
+            mx = self._get_effective_mana_max()
+            new_mana = max(0, min(mx, cur + heal_mana))
+            self.var_mana_current.set(str(new_mana))
+            results.append(f"Mana +{new_mana - cur}")
+
+        # Temporary buff (stat_boosts with turns)
+        turns = _safe_int(ref.get("consume_turns"), 0)
+        boosts = ref.get("stat_boosts", [])
+        if turns > 0 and boosts:
+            self.active_buffs.append({
+                "name": name,
+                "stat_boosts": list(boosts),
+                "turns_remaining": turns,
+            })
+            results.append(f"buff {turns} turns")
+            self._render_active_buffs()
+
+        # Permanent stat increase
+        perm_stat = ref.get("consume_perm_stat", "")
+        perm_val = _safe_int(ref.get("consume_perm_value"), 0)
+        if perm_stat and perm_val:
+            if perm_stat in STAT_KEYS:
+                try:
+                    cur = int(self.var_stats[perm_stat].get().strip() or "0")
+                except ValueError:
+                    cur = 0
+                self.var_stats[perm_stat].set(str(cur + perm_val))
+            elif perm_stat == "hp_max":
+                try:
+                    cur = int(self.var_hp_max.get().strip() or "0")
+                except ValueError:
+                    cur = 0
+                self.var_hp_max.set(str(cur + perm_val))
+            elif perm_stat == "mana_max":
+                try:
+                    cur = int(self.var_mana_max.get().strip() or "0")
+                except ValueError:
+                    cur = 0
+                self.var_mana_max.set(str(cur + perm_val))
+            stat_label = dict(BOOST_TARGET_LABELS).get(perm_stat, perm_stat)
+            results.append(f"{stat_label} permanently +{perm_val}")
+
+        # Remove the consumed item from equipment
+        try:
+            self.inv_data["equipment"].remove(ref)
+        except ValueError:
+            pass
+        self.combat_selected_ref = None
+        self.combat_selected_kind = None
+        self.inv_selected_ref["equipment"] = None
+
+        self.inv_render("equipment")
+        self.refresh_combat_list()
+        self._refresh_equipment_boosts_display()
+        self._recount_growth_items()
+
+        effect_text = ", ".join(results) if results else "no effect"
+        self.var_combat_result.set(f"Consumed {name}: {effect_text}")
+
+    def _render_active_buffs(self):
+        """Refresh the active buffs listbox."""
+        self.active_buffs_list.delete(0, tk.END)
+        stat_label_map = {k: lbl for k, lbl in BOOST_TARGET_LABELS}
+        for buff in self.active_buffs:
+            boost_parts = []
+            for b in buff.get("stat_boosts", []):
+                stat_name = stat_label_map.get(b["stat"], b["stat"])
+                if b["mode"] == "percent":
+                    boost_parts.append(f"{stat_name} {b['value']:+g}%")
+                else:
+                    boost_parts.append(f"{stat_name} {b['value']:+g}")
+            boosts_text = ", ".join(boost_parts)
+            display = f"{buff['name']}: {boosts_text} ({buff['turns_remaining']} turns)"
+            self.active_buffs_list.insert(tk.END, display)
+
+    def _remove_active_buff(self):
+        """Remove the selected active buff."""
+        sel = list(self.active_buffs_list.curselection())
+        if not sel:
+            messagebox.showinfo("Buffs", "Select a buff to remove.")
+            return
+        for idx in reversed(sel):
+            if 0 <= idx < len(self.active_buffs):
+                self.active_buffs.pop(idx)
+        self._render_active_buffs()
+        self._refresh_equipment_boosts_display()
 
     # ---------------- HP / Rest ----------------
 
@@ -3790,9 +4925,9 @@ class CharacterSheet(ttk.Frame):
 
         try:
             cur = int(self.var_hp_current.get())
-            mx = int(self.var_hp_max.get())
         except ValueError:
             return
+        mx = self._get_effective_hp_max()
 
         cur = max(0, min(mx, cur - dmg))
         self.var_hp_current.set(str(cur))
@@ -3807,9 +4942,9 @@ class CharacterSheet(ttk.Frame):
 
         try:
             cur = int(self.var_hp_current.get())
-            mx = int(self.var_hp_max.get())
         except ValueError:
             return
+        mx = self._get_effective_hp_max()
 
         cur = max(0, min(mx, cur + heal))
         self.var_hp_current.set(str(cur))
@@ -3841,15 +4976,12 @@ class CharacterSheet(ttk.Frame):
 
         try:
             cur = int(self.var_hp_current.get())
-            mx = int(self.var_hp_max.get())
         except ValueError:
             return
+        mx = self._get_effective_hp_max()
 
         # Glancing blow: compare attacker accuracy vs your Evasion stat
-        try:
-            evasion_pts = int(self.var_stats["evasion"].get().strip() or "0")
-        except Exception:
-            evasion_pts = 0
+        evasion_pts = self._get_effective_stat("evasion")
 
         glance_mult = evasion_damage_multiplier(attacker_acc, evasion_pts)
         glance_pct = int(glance_mult * 100)
@@ -3866,10 +4998,7 @@ class CharacterSheet(ttk.Frame):
         after_glance = int(math.floor(incoming * glance_mult))
 
         # Physical Defense DR
-        try:
-            phys_def_pts = int(self.var_stats["phys_def"].get().strip() or "0")
-        except Exception:
-            phys_def_pts = 0
+        phys_def_pts = self._get_effective_stat("phys_def")
 
         dr = phys_dr_from_points(phys_def_pts)
         final = max(0, after_glance - dr)
@@ -3886,14 +5015,8 @@ class CharacterSheet(ttk.Frame):
         self.var_show_used.set(False)
 
     def apply_long_rest(self):
-        try:
-            hp_mx = int(self.var_hp_max.get())
-        except ValueError:
-            hp_mx = 0
-        try:
-            mana_mx = int(self.var_mana_max.get())
-        except ValueError:
-            mana_mx = 0
+        hp_mx = self._get_effective_hp_max()
+        mana_mx = self._get_effective_mana_max()
 
         self.var_hp_current.set(str(hp_mx))
         self.var_mana_current.set(str(mana_mx))
@@ -3903,11 +5026,159 @@ class CharacterSheet(ttk.Frame):
     # ---------------- Mana density label ----------------
 
     def _refresh_mana_density_display(self):
-        try:
-            pts = int(self.var_mana_density.get().strip() or "0")
-        except ValueError:
-            pts = 0
+        pts = self._get_effective_stat("mana_density")
         self.var_mana_density_mult.set(f"x{mana_density_multiplier(pts):.2f}")
+
+    def _compute_equipment_boosts(self) -> dict:
+        """Sum passive stat boosts from equipped non-consumable items + active buffs.
+
+        Returns {target_key: {"flat": total_flat, "percent": total_pct}}.
+        Keys can be any STAT_KEY or "hp_max" / "mana_max".
+        Consumable items don't give passive boosts — their boosts only
+        apply when consumed (added to active_buffs).
+        """
+        totals = {}
+
+        def _add_boosts(boost_list):
+            for b in boost_list:
+                stat = b.get("stat", "")
+                if stat not in BOOST_TARGETS:
+                    continue
+                if stat not in totals:
+                    totals[stat] = {"flat": 0.0, "percent": 0.0}
+                try:
+                    val = float(b.get("value", 0) or 0)
+                except (ValueError, TypeError):
+                    val = 0.0
+                totals[stat][b.get("mode", "flat")] += val
+
+        # Passive boosts from non-consumable equipment
+        for it in self.inv_data.get("equipment", []):
+            if it.get("consumable", False):
+                continue  # consumables only grant boosts when consumed
+            _add_boosts(it.get("stat_boosts", []))
+
+        # Active buffs from consumed items / cast spells
+        for buff in self.active_buffs:
+            _add_boosts(buff.get("stat_boosts", []))
+
+        # Passive boosts from abilities (buff_turns == 0 means always-on)
+        for slot in self.ability_keys:
+            for ab in self.abilities_data.get(slot, []):
+                if _safe_int(ab.get("buff_turns"), 0) == 0:
+                    _add_boosts(ab.get("stat_boosts", []))
+
+        return totals
+
+    def _apply_boost(self, base: int, info: dict) -> int:
+        """Apply flat + percent boosts to a base value and return effective int."""
+        if not info:
+            return base
+        flat = info.get("flat", 0)
+        pct = info.get("percent", 0)
+        return int(base + flat + math.floor(base * pct / 100))
+
+    def _get_effective_stat(self, key: str) -> int:
+        """Return the effective value of a stat after applying equipment boosts."""
+        try:
+            base = int(self.var_stats[key].get().strip() or "0")
+        except (ValueError, KeyError):
+            base = 0
+        totals = self._compute_equipment_boosts()
+        return self._apply_boost(base, totals.get(key))
+
+    def _get_effective_hp_max(self) -> int:
+        """Return effective HP max after applying equipment boosts."""
+        try:
+            base = int(self.var_hp_max.get().strip() or "0")
+        except ValueError:
+            base = 0
+        totals = self._compute_equipment_boosts()
+        return self._apply_boost(base, totals.get("hp_max"))
+
+    def _get_effective_mana_max(self) -> int:
+        """Return effective Mana max after applying equipment boosts."""
+        try:
+            base = int(self.var_mana_max.get().strip() or "0")
+        except ValueError:
+            base = 0
+        totals = self._compute_equipment_boosts()
+        return self._apply_boost(base, totals.get("mana_max"))
+
+    def _refresh_equipment_boosts_display(self):
+        """Update the equipment-bonus labels next to each stat on the Overview tab."""
+        totals = self._compute_equipment_boosts()
+        for key in STAT_KEYS:
+            info = totals.get(key)
+            if not info:
+                self.var_equip_bonus[key].set("")
+                continue
+            parts = []
+            flat = info.get("flat", 0)
+            pct = info.get("percent", 0)
+            if flat:
+                parts.append(f"{flat:+g}")
+            if pct:
+                parts.append(f"{pct:+g}%")
+            if parts:
+                try:
+                    base = int(self.var_stats[key].get().strip() or "0")
+                except ValueError:
+                    base = 0
+                effective = self._apply_boost(base, info)
+                self.var_equip_bonus[key].set(f"({', '.join(parts)} equip) = {effective}")
+            else:
+                self.var_equip_bonus[key].set("")
+
+        # HP / Mana max boost display
+        for res_key, var, _ in [("hp_max", self.var_hp_max, "HP"),
+                                ("mana_max", self.var_mana_max, "Mana")]:
+            info = totals.get(res_key)
+            if not info:
+                self.var_equip_bonus_res[res_key].set("")
+                continue
+            parts = []
+            flat = info.get("flat", 0)
+            pct = info.get("percent", 0)
+            if flat:
+                parts.append(f"{flat:+g}")
+            if pct:
+                parts.append(f"{pct:+g}%")
+            if parts:
+                try:
+                    base = int(var.get().strip() or "0")
+                except ValueError:
+                    base = 0
+                effective = self._apply_boost(base, info)
+                self.var_equip_bonus_res[res_key].set(f"({', '.join(parts)} equip) = {effective}")
+            else:
+                self.var_equip_bonus_res[res_key].set("")
+
+        self._refresh_carry_display()
+
+    def _recount_growth_items(self):
+        """Auto-count items tagged as growth items across all inventory slots."""
+        count = 0
+        for k in self.inv_keys:
+            for it in self.inv_data[k]:
+                if it.get("is_growth_item", False):
+                    count += 1
+        self.var_growth_current.set(str(count))
+
+    def _refresh_carry_display(self):
+        """Update the carry capacity display: total weight / max carry (strength * 10)."""
+        total_weight = 0.0
+        for k in self.inv_keys:
+            if k == "storage":
+                continue
+            for it in self.inv_data[k]:
+                try:
+                    total_weight += float(it.get("weight", 0) or 0)
+                except (ValueError, TypeError):
+                    pass
+        strength = self._get_effective_stat("strength")
+        max_carry = strength * 10
+        self.var_carry_display.set(f"{total_weight:.1f} / {max_carry} lbs")
 
     # ---------------- Spend Points Popup ----------------
 
@@ -3945,7 +5216,6 @@ class CharacterSheet(ttk.Frame):
         targets = [
             ("HP (Tier 1 rule)", "hp"),
             ("Mana (Tier 1 rule)", "mana"),
-            ("Mana Density (+1 per point)", "mana_density"),
             ("", "sep"),
         ]
         for k, lab in STAT_ORDER:
@@ -4102,14 +5372,6 @@ class CharacterSheet(ttk.Frame):
             self.var_mana_current.set(str(cur))
             return spent, f"Mana +{gained} (max/current)."
 
-        # Mana density: 1 point each => +1
-        if target_id == "mana_density":
-            md = to_int(self.var_mana_density.get(), 0)
-            md += budget
-            spent = budget
-            self.var_mana_density.set(str(md))
-            return spent, f"Mana Density +{budget}."
-
         # Stats: 1 point each => +1
         if target_id.startswith("stat:"):
             k = target_id.split(":", 1)[1]
@@ -4139,13 +5401,12 @@ class CharacterSheet(ttk.Frame):
         self.var_hp_max.set(str(hp.get("max", 0)))
         self.var_mana_current.set(str(mana.get("current", 0)))
         self.var_mana_max.set(str(mana.get("max", 0)))
-        self.var_mana_density.set(str(res.get("mana_density", 0)))
-        self._refresh_mana_density_display()
         self.var_unspent.set(str(res.get("unspent_points", 0)))
 
         stats = c.get("stats", {})
         for k in STAT_KEYS:
             self.var_stats[k].set(str(stats.get(k, 0)))
+        self._refresh_mana_density_display()
 
         growth = c.get("growth_items", {})
         self.var_growth_current.set(str(growth.get("bound_current", 0)))
@@ -4166,8 +5427,26 @@ class CharacterSheet(ttk.Frame):
             self.inv_damage[k].set("")
             self.inv_apply_bonus[k].set(True)
             self.inv_is_ranged[k].set(False)
+            self.inv_boost_data[k] = []
+            self.inv_boost_render(k)
+            self.inv_consumable[k].set(False)
+            self.inv_consume_heal_hp[k].set("0")
+            self.inv_consume_heal_mana[k].set("0")
+            self.inv_consume_turns[k].set("0")
+            self.inv_consume_perm_stat[k].set("")
+            self.inv_consume_perm_value[k].set("0")
+            self.inv_is_growth_item[k].set(False)
+            self.inv_weight[k].set("0")
             nb: tk.Text = getattr(self, f"inv_notes_box_{k}")
             nb.delete("1.0", tk.END)
+
+        self._recount_growth_items()
+
+        # Mana Stones
+        stones = c.get("mana_stones", {})
+        for t in range(1, self.MAX_MANA_STONE_TIER + 1):
+            self.var_mana_stones[t].set(str(stones.get(str(t), 0)))
+        self._refresh_currency_display()
 
         ab_all = c.get("abilities")
         if not isinstance(ab_all, dict):
@@ -4187,6 +5466,9 @@ class CharacterSheet(ttk.Frame):
             self.ability_overcast_scale[slot].set("0")
             self.ability_overcast_power[slot].set("0.85")
             self.ability_overcast_cap[slot].set("999")
+
+            self.ability_boost_data[slot] = []
+            self.ability_buff_turns[slot].set("0")
 
             nb: tk.Text = getattr(self, f"ability_notes_box_{slot}")
             nb.delete("1.0", tk.END)
@@ -4208,6 +5490,7 @@ class CharacterSheet(ttk.Frame):
         self.combat_mana_entry.configure(state="disabled")
 
         self.var_hit_result.set("")
+        self._refresh_equipment_boosts_display()
 
     def apply_to_model(self):
         c = self.char
@@ -4228,11 +5511,6 @@ class CharacterSheet(ttk.Frame):
         hp["max"] = to_int_var(self.var_hp_max)
         mana["current"] = to_int_var(self.var_mana_current)
         mana["max"] = to_int_var(self.var_mana_max)
-
-        try:
-            res["mana_density"] = int(self.var_mana_density.get().strip() or "0")
-        except ValueError:
-            res["mana_density"] = 0
 
         res["unspent_points"] = to_int_var(self.var_unspent)
 
@@ -4256,7 +5534,7 @@ class CharacterSheet(ttk.Frame):
                 if not name:
                     continue
                 apply_bonus = bool(it.get("apply_bonus", it.get("apply_pbd", True)))
-                cleaned.append({
+                item_dict = {
                     "name": name,
                     "favorite": bool(it.get("favorite", False)),
                     "roll_type": it.get("roll_type", "None"),
@@ -4265,8 +5543,35 @@ class CharacterSheet(ttk.Frame):
                     "apply_bonus": apply_bonus,
                     "apply_pbd": apply_bonus,       # back-compat
                     "is_ranged": bool(it.get("is_ranged", False)),
-                })
+                }
+                boosts = _normalize_stat_boosts(it.get("stat_boosts"))
+                if boosts:
+                    item_dict["stat_boosts"] = boosts
+                if it.get("consumable"):
+                    item_dict["consumable"] = True
+                    item_dict["consume_heal_hp"] = _safe_int(it.get("consume_heal_hp"), 0)
+                    item_dict["consume_heal_mana"] = _safe_int(it.get("consume_heal_mana"), 0)
+                    item_dict["consume_turns"] = _safe_int(it.get("consume_turns"), 0)
+                    perm_stat = it.get("consume_perm_stat", "")
+                    perm_val = _safe_int(it.get("consume_perm_value"), 0)
+                    if perm_stat and perm_val:
+                        item_dict["consume_perm_stat"] = perm_stat
+                        item_dict["consume_perm_value"] = perm_val
+                if it.get("is_growth_item"):
+                    item_dict["is_growth_item"] = True
+                w = float(it.get("weight", 0) or 0)
+                if w:
+                    item_dict["weight"] = w
+                cleaned.append(item_dict)
             inv[k] = cleaned
+
+        # Mana Stones save
+        stones = {}
+        for t in range(1, self.MAX_MANA_STONE_TIER + 1):
+            val = self._get_stone_count(t)
+            if val > 0:
+                stones[str(t)] = val
+        c["mana_stones"] = stones
 
         # Abilities save
         ab_all = c.setdefault("abilities", {"core": [], "inner": [], "outer": []})
@@ -4276,7 +5581,7 @@ class CharacterSheet(ttk.Frame):
                 name = (ab.get("name") or "").strip()
                 if not name:
                     continue
-                cleaned.append({
+                ab_dict = {
                     "name": name,
                     "favorite": bool(ab.get("favorite", False)),
                     "roll_type": ab.get("roll_type", "None"),
@@ -4284,7 +5589,14 @@ class CharacterSheet(ttk.Frame):
                     "mana_cost": int(ab.get("mana_cost", 0) or 0),
                     "overcast": ab.get("overcast", {"enabled": False, "scale": 0, "power": 0.85, "cap": 999}),
                     "notes": ab.get("notes", ""),
-                })
+                }
+                boosts = _normalize_stat_boosts(ab.get("stat_boosts"))
+                if boosts:
+                    ab_dict["stat_boosts"] = boosts
+                bt = _safe_int(ab.get("buff_turns"), 0)
+                if bt > 0:
+                    ab_dict["buff_turns"] = bt
+                cleaned.append(ab_dict)
             ab_all[slot] = cleaned
 
         c["notes"] = self.notes_text.get("1.0", tk.END).rstrip("\n")

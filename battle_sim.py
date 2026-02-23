@@ -17,26 +17,28 @@ ABILITY_MODS = {
 STAT_ORDER = [
     ("melee_acc",  "Melee Acc"),
     ("ranged_acc", "Ranged Acc"),
-    ("spellcraft", "Spellcraft"),
-    ("pbd",        "PBD"),
-    ("precision",  "Precision"),
-    ("phys_def",   "Defense"),
-    ("evasion",    "Evasion"),
-    ("wis_def",    "Wisdom"),
-    ("utility",    "Utility"),
-    ("agility",    "Agility"),
-    ("strength",   "Strength"),
+    ("spellcraft",    "Spellcraft"),
+    ("pbd",           "PBD"),
+    ("mana_density",  "Mana Density"),
+    ("precision",     "Precision"),
+    ("phys_def",      "Defense"),
+    ("evasion",       "Evasion"),
+    ("wis_def",       "Wisdom"),
+    ("utility",       "Utility"),
+    ("agility",       "Agility"),
+    ("strength",      "Strength"),
 ]
 STAT_KEYS = [k for k, _ in STAT_ORDER]
 
 # Combat-relevant stats shown in the character panels
 COMBAT_STATS = [
-    ("melee_acc",  "Melee Acc"),
-    ("ranged_acc", "Ranged Acc"),
-    ("spellcraft", "Spellcraft"),
-    ("pbd",        "PBD"),
-    ("precision",  "Precision"),
-    ("phys_def",   "Defense"),
+    ("melee_acc",     "Melee Acc"),
+    ("ranged_acc",    "Ranged Acc"),
+    ("spellcraft",    "Spellcraft"),
+    ("pbd",           "PBD"),
+    ("mana_density",  "Mana Density"),
+    ("precision",     "Precision"),
+    ("phys_def",      "Defense"),
     ("evasion",    "Evasion"),
     ("wis_def",    "Wisdom"),
 ]
@@ -160,6 +162,14 @@ def _migrate_stats(char: dict):
             old_pbd = 0
         if old_pbd > 0 and stats.get("pbd", 0) == 0:
             stats["pbd"] = old_pbd
+    # Migrate Mana Density from resources if needed
+    if isinstance(res, dict) and "mana_density" in res:
+        try:
+            old_md = int(res.get("mana_density", 0) or 0)
+        except Exception:
+            old_md = 0
+        if old_md > 0 and stats.get("mana_density", 0) == 0:
+            stats["mana_density"] = old_md
 
 
 def _ensure_item(x):
@@ -249,7 +259,7 @@ def build_sim_character(char_dict: dict) -> dict:
         "hp_current": int(hp.get("current", hp.get("max", 20)) or 20),
         "mana_max": int(mana.get("max", 10) or 10),
         "mana_current": int(mana.get("current", mana.get("max", 10)) or 10),
-        "mana_density": int(res.get("mana_density", 0) or 0),
+        "mana_density": int(stats.get("mana_density", 0) or 0),
         "actions": actions,
     }
 
