@@ -1781,6 +1781,47 @@ class CharacterSheet(ttk.Frame):
         self._build_spell_library_tab()
         self._build_item_library_tab()
 
+    def _make_scrollable_frame(self, parent):
+        """Create a vertically scrollable frame inside *parent*.
+
+        Returns the inner ttk.Frame that should be used as the parent for
+        child widgets.  The canvas + scrollbar handle resizing and mousewheel
+        scrolling automatically.
+        """
+        canvas = tk.Canvas(parent, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        inner = ttk.Frame(canvas)
+
+        inner.bind(
+            "<Configure>",
+            lambda _e, c=canvas: c.configure(scrollregion=c.bbox("all"))
+        )
+        win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        def _on_canvas_configure(event, c=canvas, w=win_id):
+            c.itemconfig(w, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event, c=canvas):
+            c.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _bind_mw(event, c=canvas):
+            c.bind_all("<MouseWheel>", lambda e, c2=c: c2.yview_scroll(int(-1 * (e.delta / 120)), "units"))
+
+        def _unbind_mw(event, c=canvas):
+            c.unbind_all("<MouseWheel>")
+
+        canvas.bind("<Enter>", _bind_mw)
+        canvas.bind("<Leave>", _unbind_mw)
+
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._tk_widgets.append(canvas)
+
+        return inner
+
     def _build_overview_tab(self):
         # Scrollable wrapper for the overview tab
         overview_canvas = tk.Canvas(self.tab_overview, highlightthickness=0)
@@ -1814,6 +1855,7 @@ class CharacterSheet(ttk.Frame):
 
         overview_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         overview_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._tk_widgets.append(overview_canvas)
 
         left = ttk.Frame(overview_inner)
         right = ttk.Frame(overview_inner)
@@ -2397,7 +2439,9 @@ class CharacterSheet(ttk.Frame):
         ttk.Button(controls, text="Remove", command=lambda k=key: self.inv_remove(k)).pack(side=tk.LEFT)
         ttk.Button(controls, text="Toggle ⭐", command=lambda k=key: self.inv_toggle_favorite(k)).pack(side=tk.LEFT, padx=6)
 
-        details = ttk.LabelFrame(right, text="Selected Item (combat info)")
+        scroll_inner = self._make_scrollable_frame(right)
+
+        details = ttk.LabelFrame(scroll_inner, text="Selected Item (combat info)")
         details.pack(fill=tk.BOTH, expand=True)
 
         ttk.Label(details, text="Roll type:").grid(row=0, column=0, sticky="w", padx=6, pady=(8, 4))
@@ -2887,7 +2931,9 @@ class CharacterSheet(ttk.Frame):
             ttk.Button(controls, text="Generate", command=lambda k=key: self.spell_generate_dialog(k)).pack(side=tk.LEFT, padx=6)
         ttk.Button(controls, text="Toggle ⭐", command=lambda k=key: self.ability_toggle_favorite(k)).pack(side=tk.LEFT, padx=6)
 
-        details = ttk.LabelFrame(right, text="Selected Ability (combat info)")
+        scroll_inner = self._make_scrollable_frame(right)
+
+        details = ttk.LabelFrame(scroll_inner, text="Selected Ability (combat info)")
         details.pack(fill=tk.BOTH, expand=True)
 
         ttk.Label(details, text="Roll type:").grid(row=0, column=0, sticky="w", padx=6, pady=(8, 4))
