@@ -363,6 +363,92 @@ T1_HP_SOFT_CAP = 100
 T1_HP_GAIN_BEFORE_CAP = 2
 T1_HP_GAIN_AFTER_CAP = 1  # tweak if you want a different post-cap rate
 
+# -------- Mob Generator Constants --------
+
+MOB_STAT_RANGES = {
+    "T1": (10, 30),
+    "T2": (30, 60),
+    "T3": (60, 110),
+    "T4": (110, 200),
+}
+
+MOB_HP_RANGES = {
+    "T1": (40, 200),
+    "T2": (160, 500),
+    "T3": (400, 1000),
+    "T4": (800, 2000),
+}
+
+MOB_MANA_RANGES = {
+    "T1": (20, 100),
+    "T2": (80, 240),
+    "T3": (200, 600),
+    "T4": (500, 1200),
+}
+
+MOB_POSITION_RANGES = {
+    "Bottom": (0.0, 0.15),
+    "Low":    (0.15, 0.35),
+    "Mid":    (0.35, 0.55),
+    "High":   (0.55, 0.75),
+    "Peak":   (0.75, 1.0),
+}
+
+MOB_POWER_MULTIPLIERS = {
+    "Swarm":          0.3,
+    "Extremely Weak": 0.5,
+    "Weak":           0.65,
+    "Adept":          0.8,
+    "Average":        1.0,
+    "Above Average":  1.15,
+    "Strong":         1.3,
+    "Elite":          1.5,
+    "Scion":          1.75,
+    "Best in World":  2.0,
+}
+
+MOB_TAG_WEIGHTS = {
+    "Melee": {
+        "melee_acc": 1.3, "pbd": 1.3, "strength": 1.2, "phys_def": 1.2,
+        "ranged_acc": 0.7, "spellcraft": 0.7, "mana_density": 0.7,
+        "precision": 0.7, "evasion": 0.7, "wis_def": 0.7,
+        "utility": 0.7, "agility": 0.7,
+    },
+    "Ranged": {
+        "ranged_acc": 1.3, "precision": 1.3, "agility": 1.2, "evasion": 1.2,
+        "melee_acc": 0.7, "pbd": 0.7, "strength": 0.7, "spellcraft": 0.7,
+        "mana_density": 0.7, "phys_def": 0.7, "wis_def": 0.7, "utility": 0.7,
+    },
+    "Magic": {
+        "spellcraft": 1.3, "mana_density": 1.4, "wis_def": 1.1,
+        "melee_acc": 0.6, "ranged_acc": 0.6, "pbd": 0.6, "strength": 0.6,
+        "precision": 0.6, "phys_def": 0.6, "evasion": 0.6,
+        "utility": 0.6, "agility": 0.6,
+        "mana_pool_mult": 1.5,
+    },
+    "Support": {
+        "wis_def": 1.3, "utility": 1.3, "mana_density": 1.1,
+        "melee_acc": 0.9, "ranged_acc": 0.9, "spellcraft": 0.9,
+        "pbd": 0.9, "precision": 0.9, "phys_def": 0.9,
+        "evasion": 0.9, "strength": 0.9, "agility": 0.9,
+    },
+}
+
+MOB_NAME_PREFIXES = [
+    "Shadow", "Iron", "Crimson", "Stone", "Frost", "Dark", "Wild", "Storm",
+    "Ancient", "Rogue", "Fell", "Dread", "Ember", "Thorn", "Pale", "Grim",
+    "Hollow", "Dire", "Silent", "Ashen", "Blighted", "Rusted", "Scarred",
+]
+
+MOB_NAME_BASES = [
+    "Wolf", "Skeleton", "Golem", "Drake", "Bandit", "Spider", "Wraith",
+    "Troll", "Cultist", "Serpent", "Guardian", "Knight", "Mage", "Scout",
+    "Brute", "Archer", "Sentinel", "Prowler", "Shade", "Beast", "Elemental",
+    "Warden", "Reaver", "Stalker", "Fiend", "Construct", "Phantasm",
+]
+
+MOB_COMBAT_TAGS = ["Melee", "Ranged", "Magic", "Support"]
+
 # ---------- New Stats (your list) ----------
 STAT_ORDER = [
     ("melee_acc",     "Melee Accuracy"),
@@ -381,6 +467,30 @@ STAT_ORDER = [
     ("strength",      "Strength"),
 ]
 STAT_KEYS = [k for k, _ in STAT_ORDER]
+
+ARMOR_SLOTS = [
+    "Head",
+    "Shoulders",
+    "Chest",
+    "Back",
+    "Upper Arms",
+    "Bracers/Forearms",
+    "Gauntlets/Hands",
+    "Belt/Waist",
+    "Legs/Greaves",
+    "Boots/Feet",
+    "Necklace",
+    "Left Thumb",
+    "Left Index",
+    "Left Middle",
+    "Left Ring",
+    "Left Pinky",
+    "Right Thumb",
+    "Right Index",
+    "Right Middle",
+    "Right Ring",
+    "Right Pinky",
+]
 
 
 def clamp(x: float, lo: float, hi: float) -> float:
@@ -689,7 +799,7 @@ def ensure_item_obj(x):
         "stat_boosts": [], "consumable": False,
         "consume_heal_hp": 0, "consume_heal_mana": 0, "consume_turns": 0,
         "consume_perm_stat": "", "consume_perm_value": 0,
-        "is_growth_item": False, "weight": 0.0,
+        "is_growth_item": False, "weight": 0.0, "armor_slot": "",
     }
     if isinstance(x, str):
         d = dict(defaults)
@@ -716,6 +826,7 @@ def ensure_item_obj(x):
             "consume_perm_value": _safe_int(x.get("consume_perm_value"), 0),
             "is_growth_item": bool(x.get("is_growth_item", False)),
             "weight": float(x.get("weight", 0) or 0),
+            "armor_slot": x.get("armor_slot", ""),
         }
     return dict(defaults)
 
@@ -961,6 +1072,212 @@ def generate_spell_description(name: str, element: str, archetype: str, stats: d
         base += f" Costs {stats['mana_cost']} mana."
 
     return base
+
+
+# ======================== Mob Generator Logic ========================
+
+def _generate_fallback_items(tags: list, tier: str) -> list:
+    """Generate basic weapons when the item library has nothing suitable."""
+    tier_info = TIER_DICE.get(tier, DEFAULT_TIER_DICE)
+    valid_dice = [d for d in [4, 6, 8, 10, 12, 20]
+                  if tier_info["min"] <= d <= tier_info["max"]]
+    items = []
+
+    if "Melee" in tags or (not tags):
+        ds = random.choice(valid_dice)
+        dc = random.randint(*tier_info["count_range"])
+        bonus = random.randint(0, dc)
+        dmg = f"{dc}d{ds}" + (f"+{bonus}" if bonus else "")
+        items.append(ensure_item_obj({
+            "name": f"Basic {random.choice(['Sword', 'Axe', 'Mace', 'Spear', 'Hammer', 'Glaive'])}",
+            "roll_type": "Attack", "damage": dmg,
+            "is_ranged": False, "apply_bonus": True,
+        }))
+
+    if "Ranged" in tags:
+        ds = random.choice(valid_dice)
+        dc = random.randint(*tier_info["count_range"])
+        bonus = random.randint(0, dc)
+        dmg = f"{dc}d{ds}" + (f"+{bonus}" if bonus else "")
+        items.append(ensure_item_obj({
+            "name": f"Basic {random.choice(['Bow', 'Crossbow', 'Sling', 'Javelin', 'Throwing Knife'])}",
+            "roll_type": "Attack", "damage": dmg,
+            "is_ranged": True, "apply_bonus": True,
+        }))
+
+    if not items:
+        items.append(ensure_item_obj({
+            "name": "Improvised Weapon", "roll_type": "Attack",
+            "damage": "1d4", "is_ranged": False, "apply_bonus": True,
+        }))
+    return items
+
+
+def _select_mob_items(tags: list, tier: str) -> list:
+    """Select 2-4 appropriate items from the item library based on tags."""
+    all_items = get_library_items()
+    candidates = []
+    for entry in all_items:
+        item = entry.get("item", {})
+        item_obj = ensure_item_obj(item)
+        score = 0
+        for tag in tags:
+            if tag == "Melee" and not item_obj.get("is_ranged") and item_obj.get("roll_type") in ("Attack", "None"):
+                score += 2
+            elif tag == "Ranged" and item_obj.get("is_ranged"):
+                score += 2
+            elif tag == "Magic":
+                score += 1
+            elif tag == "Support" and (item_obj.get("consumable") or item_obj.get("roll_type") == "None"):
+                score += 1
+        if not tags:
+            score = 1
+        if score > 0:
+            candidates.append((score, item_obj))
+
+    candidates.sort(key=lambda x: (-x[0], random.random()))
+    count = min(random.randint(2, 4), len(candidates))
+    selected = [item for _, item in candidates[:count]]
+
+    if not selected:
+        selected = _generate_fallback_items(tags, tier)
+    return selected
+
+
+def _generate_fallback_spells(tags: list, tier: str, count: int) -> list:
+    """Generate basic spells using the existing spell generation system."""
+    spells = []
+    has_magic = "Magic" in tags
+    for i in range(count):
+        if has_magic:
+            archetype = random.choice(["offensive", "offensive", "debuff", "defensive", "buff"])
+        else:
+            archetype = random.choice(["utility", "buff", "defensive"])
+        element = random.choice(list(SPELL_ELEMENTS.keys()))
+        category = ["core", "inner", "outer"][i % 3]
+        name = generate_spell_name(element, archetype)
+        stats = calculate_spell_stats(archetype, tier, category, 0)
+        description = generate_spell_description(name, element, archetype, stats)
+        spell = {
+            "name": name, "favorite": False,
+            "roll_type": stats["roll_type"], "damage": stats["damage"],
+            "mana_cost": stats["mana_cost"], "notes": description,
+            "overcast": stats["overcast"], "stat_boosts": [], "buff_turns": 0,
+        }
+        spells.append(ensure_ability_obj(spell))
+    return spells
+
+
+def _select_mob_spells(tags: list, tier: str) -> dict:
+    """Select and distribute spells across ability slots based on tags."""
+    has_magic = "Magic" in tags
+    has_support = "Support" in tags
+
+    if has_magic:
+        spell_count = random.randint(3, 5)
+    elif has_support:
+        spell_count = random.randint(2, 3)
+    else:
+        spell_count = random.randint(0, 1)
+
+    if spell_count == 0:
+        return {"core": [], "inner": [], "outer": []}
+
+    all_spells = get_library_spells()
+    candidates = []
+    for entry in all_spells:
+        spell = entry.get("spell", {})
+        metadata = entry.get("metadata", {})
+        spell_tier = metadata.get("tier", "T1")
+        archetype = metadata.get("archetype", "unknown")
+        score = 0
+        if spell_tier == tier:
+            score += 2
+        if has_magic and archetype in ("offensive", "debuff", "unknown"):
+            score += 2
+        if has_support and archetype in ("defensive", "buff", "healing", "unknown"):
+            score += 2
+        if not has_magic and not has_support and archetype in ("utility", "unknown"):
+            score += 1
+        if score > 0:
+            candidates.append((score, ensure_ability_obj(spell)))
+
+    candidates.sort(key=lambda x: (-x[0], random.random()))
+    actual_count = min(spell_count, len(candidates))
+    selected = [spell for _, spell in candidates[:actual_count]]
+
+    if not selected and spell_count > 0:
+        selected = _generate_fallback_spells(tags, tier, spell_count)
+
+    result = {"core": [], "inner": [], "outer": []}
+    slots = ["core", "inner", "outer"]
+    for i, spell in enumerate(selected):
+        result[slots[i % 3]].append(spell)
+    return result
+
+
+def generate_mob_character(name: str, tier: str, position: str,
+                           power_level: str, tags: list) -> dict:
+    """Generate a complete character dict for a mob/NPC.
+
+    Returns a dict matching default_character_template() schema.
+    """
+    if not name.strip():
+        name = random.choice(MOB_NAME_PREFIXES) + " " + random.choice(MOB_NAME_BASES)
+
+    # Base stat calculation
+    stat_lo, stat_hi = MOB_STAT_RANGES.get(tier, (5, 15))
+    pos_lo, pos_hi = MOB_POSITION_RANGES.get(position, (0.35, 0.55))
+    power_mult = MOB_POWER_MULTIPLIERS.get(power_level, 1.0)
+    pos_factor = random.uniform(pos_lo, pos_hi)
+    base_stat = stat_lo + (stat_hi - stat_lo) * pos_factor
+    base_stat *= power_mult
+
+    # Merge tag weights
+    if not tags:
+        merged_weights = {k: 1.0 for k in STAT_KEYS}
+        mana_pool_mult = 1.0
+    else:
+        merged_weights = {}
+        for k in STAT_KEYS:
+            total = sum(MOB_TAG_WEIGHTS.get(tag, {}).get(k, 1.0) for tag in tags)
+            merged_weights[k] = total / len(tags)
+        mana_pool_mult = sum(
+            MOB_TAG_WEIGHTS.get(tag, {}).get("mana_pool_mult", 1.0) for tag in tags
+        ) / len(tags)
+
+    # Generate per-stat values
+    stats = {}
+    for k in STAT_KEYS:
+        val = base_stat * merged_weights[k]
+        val *= random.uniform(0.9, 1.1)
+        stats[k] = max(0, int(round(val)))
+
+    # Generate HP and Mana
+    hp_lo, hp_hi = MOB_HP_RANGES.get(tier, (20, 100))
+    mana_lo, mana_hi = MOB_MANA_RANGES.get(tier, (10, 50))
+    hp_max = max(1, int(round(
+        (hp_lo + (hp_hi - hp_lo) * pos_factor) * power_mult * random.uniform(0.9, 1.1)
+    )))
+    mana_max = max(1, int(round(
+        (mana_lo + (mana_hi - mana_lo) * pos_factor) * power_mult * mana_pool_mult * random.uniform(0.9, 1.1)
+    )))
+
+    # Select items and spells from libraries (with fallbacks)
+    equipment = _select_mob_items(tags, tier)
+    abilities = _select_mob_spells(tags, tier)
+
+    # Assemble character
+    char = default_character_template(name)
+    char["tier"] = tier
+    char["resources"]["hp"] = {"current": hp_max, "max": hp_max}
+    char["resources"]["mana"] = {"current": mana_max, "max": mana_max}
+    char["stats"] = stats
+    char["inventory"]["equipment"] = equipment
+    char["abilities"] = abilities
+    tag_str = ", ".join(tags) if tags else "none"
+    char["notes"] = f"Generated mob: {power_level} {position} {tier}, tags: {tag_str}"
+    return char
 
 
 def generate_spell_options(prompt_data: dict, category: str, tier: str,
@@ -1671,6 +1988,9 @@ class CharacterSheet(ttk.Frame):
         self.var_carry_display = tk.StringVar(value="")
         self.var_currency_display = tk.StringVar(value="")
 
+        # Armor slot assignment (per inventory category)
+        self.inv_armor_slot = {k: tk.StringVar(value="(none)") for k in self.inv_keys}
+
         # Abilities
         self.ability_keys = ["core", "inner", "outer"]
         self.abilities_data = {k: [] for k in self.ability_keys}
@@ -1757,6 +2077,7 @@ class CharacterSheet(ttk.Frame):
         self.tab_settings = ttk.Frame(self.tabs)
         self.tab_spell_library = ttk.Frame(self.tabs)
         self.tab_item_library = ttk.Frame(self.tabs)
+        self.tab_mob_generator = ttk.Frame(self.tabs)
 
         self.tabs.add(self.tab_overview, text="Overview")
         self.tabs.add(self.tab_inventory, text="Inventory")
@@ -1769,6 +2090,7 @@ class CharacterSheet(ttk.Frame):
         if self.is_dm:
             self.tabs.add(self.tab_spell_library, text="Spell Library (DM)")
             self.tabs.add(self.tab_item_library, text="Item Library (DM)")
+            self.tabs.add(self.tab_mob_generator, text="Mob Generator (DM)")
 
         self._build_overview_tab()
         self._build_inventory_tab()
@@ -1780,6 +2102,7 @@ class CharacterSheet(ttk.Frame):
         self._build_settings_tab()
         self._build_spell_library_tab()
         self._build_item_library_tab()
+        self._build_mob_generator_tab()
 
     def _make_scrollable_frame(self, parent):
         """Create a vertically scrollable frame inside *parent*.
@@ -2043,6 +2366,9 @@ class CharacterSheet(ttk.Frame):
         w = float(it.get("weight", 0) or 0)
         if w:
             d["weight"] = w
+        slot = it.get("armor_slot", "")
+        if slot:
+            d["armor_slot"] = slot
         return d
 
     def _clean_ability_for_json(self, ab: dict) -> dict:
@@ -2171,6 +2497,10 @@ class CharacterSheet(ttk.Frame):
             tw.tag_configure("code_block", foreground=fg, background=code_bg)
             tw.tag_configure("table", foreground=fg)
             tw.tag_configure("bullet", foreground=fg)
+        # Re-draw body map with new theme colors
+        if hasattr(self, "body_canvas"):
+            self._draw_body_model()
+            self._refresh_body_map()
 
     def _get_current_colors(self):
         """Get the current theme colors from the app."""
@@ -2212,6 +2542,11 @@ class CharacterSheet(ttk.Frame):
         currency_frame = ttk.Frame(self.inv_tabs)
         self.inv_tabs.add(currency_frame, text="Currency")
         self._build_currency_tab(currency_frame)
+
+        # Body Map sub-tab
+        body_map_frame = ttk.Frame(self.inv_tabs)
+        self.inv_tabs.add(body_map_frame, text="Body Map")
+        self._build_body_map_tab(body_map_frame)
 
     def _build_currency_tab(self, parent):
         outer = ttk.Frame(parent)
@@ -2415,6 +2750,292 @@ class CharacterSheet(ttk.Frame):
                 parts.append(f"T{t}: {count}")
         self.var_currency_display.set(", ".join(parts) if parts else "No mana stones")
 
+    # ======================== Body Map ========================
+
+    def _build_body_map_tab(self, parent):
+        outer = ttk.Frame(parent)
+        outer.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Left: Canvas with body model
+        canvas_frame = ttk.Frame(outer)
+        canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.body_canvas = tk.Canvas(canvas_frame, width=420, height=600, highlightthickness=1)
+        self.body_canvas.pack(fill=tk.BOTH, expand=True)
+        self._tk_widgets.append(self.body_canvas)
+
+        # Right: Slot detail panel
+        detail_frame = ttk.LabelFrame(outer, text="Slot Details")
+        detail_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0))
+
+        self.body_map_slot_name = tk.StringVar(value="Click a body part")
+        self.body_map_item_name = tk.StringVar(value="")
+        self._body_map_selected_slot = None
+
+        ttk.Label(detail_frame, textvariable=self.body_map_slot_name,
+                  font=("TkDefaultFont", 12, "bold")).pack(anchor="w", padx=10, pady=(10, 4))
+        ttk.Label(detail_frame, textvariable=self.body_map_item_name,
+                  wraplength=250).pack(anchor="w", padx=10, pady=4)
+
+        self.body_map_details_text = tk.Text(detail_frame, wrap="word", height=10, state="disabled")
+        self.body_map_details_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=(4, 10))
+        self._tk_widgets.append(self.body_map_details_text)
+
+        ttk.Button(detail_frame, text="Unequip Slot",
+                   command=self._body_map_unequip).pack(padx=10, pady=(0, 10))
+
+        # Draw the body and bind clicks
+        self._draw_body_model()
+        self.body_canvas.bind("<Button-1>", self._body_map_click)
+
+    def _draw_body_model(self):
+        """Draw a front-view humanoid silhouette with clickable slot regions."""
+        c = self.body_canvas
+        c.delete("all")
+        colors = self._get_current_colors()
+        empty_fill = colors.get("entry_bg", "#3c3c3c")
+        outline_color = colors.get("fg", "#cccccc")
+        text_color = colors.get("fg", "#cccccc")
+
+        # Store regions for hit-testing: slot_name -> (x1, y1, x2, y2)
+        self._body_slot_regions = {}
+
+        def draw_slot(slot_name, x1, y1, x2, y2, shape="rect", label=None):
+            """Draw a slot region on the canvas."""
+            tag = f"slot_{slot_name}"
+            if shape == "oval":
+                c.create_oval(x1, y1, x2, y2, fill=empty_fill, outline=outline_color,
+                              width=2, tags=("slot", tag, "body_shape"))
+            else:
+                c.create_rectangle(x1, y1, x2, y2, fill=empty_fill, outline=outline_color,
+                                   width=2, tags=("slot", tag, "body_shape"))
+            # Label text
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+            display_label = label if label else slot_name
+            font_size = 7 if len(display_label) > 8 else 8
+            c.create_text(cx, cy, text=display_label, fill=text_color,
+                         font=("TkDefaultFont", font_size), tags=("slot", tag, "body_text"))
+            self._body_slot_regions[slot_name] = (x1, y1, x2, y2)
+
+        def draw_ring(slot_name, cx, cy, label=""):
+            """Draw a small ring circle."""
+            r = 8
+            tag = f"slot_{slot_name}"
+            c.create_oval(cx - r, cy - r, cx + r, cy + r, fill=empty_fill,
+                         outline=outline_color, width=2, tags=("slot", tag, "body_shape"))
+            c.create_text(cx, cy, text=label, fill=text_color,
+                         font=("TkDefaultFont", 6, "bold"), tags=("slot", tag, "body_text"))
+            self._body_slot_regions[slot_name] = (cx - r, cy - r, cx + r, cy + r)
+
+        # --- Head ---
+        draw_slot("Head", 175, 20, 245, 80, shape="oval")
+
+        # --- Necklace ---
+        draw_slot("Necklace", 190, 85, 230, 105, shape="oval", label="Neck")
+
+        # --- Shoulders ---
+        draw_slot("Shoulders", 115, 110, 175, 150)
+        # Mirror right shoulder (same slot)
+        tag_sh = "slot_Shoulders"
+        c.create_rectangle(245, 110, 305, 150, fill=empty_fill, outline=outline_color,
+                          width=2, tags=("slot", tag_sh, "body_shape"))
+        c.create_text(275, 130, text="Shoulders", fill=text_color,
+                     font=("TkDefaultFont", 7), tags=("slot", tag_sh, "body_text"))
+
+        # --- Upper Arms ---
+        draw_slot("Upper Arms", 85, 155, 120, 230, label="U.Arm")
+        # Mirror right
+        tag_ua = "slot_Upper Arms"
+        c.create_rectangle(300, 155, 335, 230, fill=empty_fill, outline=outline_color,
+                          width=2, tags=("slot", tag_ua, "body_shape"))
+        c.create_text(317, 192, text="U.Arm", fill=text_color,
+                     font=("TkDefaultFont", 7), tags=("slot", tag_ua, "body_text"))
+        self._body_slot_regions["Upper Arms"] = (85, 155, 335, 230)
+
+        # --- Chest ---
+        draw_slot("Chest", 140, 110, 280, 240)
+
+        # --- Back ---
+        draw_slot("Back", 282, 140, 340, 200, label="Back")
+
+        # --- Bracers/Forearms ---
+        draw_slot("Bracers/Forearms", 65, 235, 115, 310, label="Bracer")
+        tag_bf = "slot_Bracers/Forearms"
+        c.create_rectangle(305, 235, 355, 310, fill=empty_fill, outline=outline_color,
+                          width=2, tags=("slot", tag_bf, "body_shape"))
+        c.create_text(330, 272, text="Bracer", fill=text_color,
+                     font=("TkDefaultFont", 7), tags=("slot", tag_bf, "body_text"))
+
+        # --- Gauntlets/Hands ---
+        draw_slot("Gauntlets/Hands", 50, 315, 110, 360, label="Gauntlet")
+        tag_gh = "slot_Gauntlets/Hands"
+        c.create_rectangle(310, 315, 370, 360, fill=empty_fill, outline=outline_color,
+                          width=2, tags=("slot", tag_gh, "body_shape"))
+        c.create_text(340, 337, text="Gauntlet", fill=text_color,
+                     font=("TkDefaultFont", 7), tags=("slot", tag_gh, "body_text"))
+
+        # --- Belt/Waist ---
+        draw_slot("Belt/Waist", 140, 245, 280, 270, label="Belt")
+
+        # --- Legs/Greaves ---
+        draw_slot("Legs/Greaves", 140, 275, 205, 430, label="L.Leg")
+        tag_lg = "slot_Legs/Greaves"
+        c.create_rectangle(215, 275, 280, 430, fill=empty_fill, outline=outline_color,
+                          width=2, tags=("slot", tag_lg, "body_shape"))
+        c.create_text(247, 352, text="R.Leg", fill=text_color,
+                     font=("TkDefaultFont", 7), tags=("slot", tag_lg, "body_text"))
+
+        # --- Boots/Feet ---
+        draw_slot("Boots/Feet", 130, 435, 205, 475, label="L.Boot")
+        tag_bt = "slot_Boots/Feet"
+        c.create_rectangle(215, 435, 290, 475, fill=empty_fill, outline=outline_color,
+                          width=2, tags=("slot", tag_bt, "body_shape"))
+        c.create_text(252, 455, text="R.Boot", fill=text_color,
+                     font=("TkDefaultFont", 7), tags=("slot", tag_bt, "body_text"))
+
+        # --- Ring slots (Left hand) ---
+        left_ring_x = 35
+        ring_start_y = 370
+        ring_spacing = 20
+        left_rings = [
+            ("Left Thumb",  "T"),
+            ("Left Index",  "I"),
+            ("Left Middle", "M"),
+            ("Left Ring",   "R"),
+            ("Left Pinky",  "P"),
+        ]
+        for i, (slot_name, label) in enumerate(left_rings):
+            draw_ring(slot_name, left_ring_x, ring_start_y + i * ring_spacing, label)
+
+        # --- Ring slots (Right hand) ---
+        right_ring_x = 385
+        right_rings = [
+            ("Right Thumb",  "T"),
+            ("Right Index",  "I"),
+            ("Right Middle", "M"),
+            ("Right Ring",   "R"),
+            ("Right Pinky",  "P"),
+        ]
+        for i, (slot_name, label) in enumerate(right_rings):
+            draw_ring(slot_name, right_ring_x, ring_start_y + i * ring_spacing, label)
+
+        # Ring column labels
+        c.create_text(left_ring_x, ring_start_y - 15, text="L Rings", fill=text_color,
+                     font=("TkDefaultFont", 7), tags=("body_text",))
+        c.create_text(right_ring_x, ring_start_y - 15, text="R Rings", fill=text_color,
+                     font=("TkDefaultFont", 7), tags=("body_text",))
+
+    def _body_map_click(self, event):
+        """Handle click on the body map canvas - find which slot was clicked."""
+        items = self.body_canvas.find_overlapping(
+            event.x - 4, event.y - 4, event.x + 4, event.y + 4
+        )
+        clicked_slot = None
+        for item_id in items:
+            tags = self.body_canvas.gettags(item_id)
+            for tag in tags:
+                if tag.startswith("slot_"):
+                    clicked_slot = tag[5:]
+                    break
+            if clicked_slot:
+                break
+
+        if not clicked_slot or clicked_slot not in ARMOR_SLOTS:
+            return
+
+        # Find equipped item for this slot
+        equipped_item = None
+        for it in self.inv_data.get("equipment", []):
+            if it.get("armor_slot", "") == clicked_slot:
+                equipped_item = it
+                break
+
+        self._body_map_selected_slot = clicked_slot
+        self.body_map_slot_name.set(clicked_slot)
+
+        if equipped_item:
+            self.body_map_item_name.set(f"Equipped: {equipped_item.get('name', '?')}")
+            details_parts = []
+            if equipped_item.get("roll_type", "None") != "None":
+                details_parts.append(f"Roll: {equipped_item['roll_type']}")
+            if equipped_item.get("damage"):
+                details_parts.append(f"Damage: {equipped_item['damage']}")
+            boosts = equipped_item.get("stat_boosts", [])
+            if boosts:
+                details_parts.append("\nStat Boosts:")
+                stat_label_map = dict(BOOST_TARGET_LABELS)
+                for b in boosts:
+                    stat_name = stat_label_map.get(b["stat"], b["stat"])
+                    if b["mode"] == "percent":
+                        details_parts.append(f"  {stat_name}: {b['value']:+g}%")
+                    else:
+                        details_parts.append(f"  {stat_name}: {b['value']:+g}")
+            w = float(equipped_item.get("weight", 0) or 0)
+            if w:
+                details_parts.append(f"\nWeight: {w} lbs")
+            if equipped_item.get("notes"):
+                details_parts.append(f"\nNotes:\n{equipped_item['notes']}")
+            details_text = "\n".join(details_parts) if details_parts else "(no combat stats)"
+        else:
+            self.body_map_item_name.set("Empty")
+            details_text = "No item equipped in this slot."
+
+        txt = self.body_map_details_text
+        txt.configure(state="normal")
+        txt.delete("1.0", tk.END)
+        txt.insert("1.0", details_text)
+        txt.configure(state="disabled")
+
+    def _body_map_unequip(self):
+        """Clear the armor_slot on the item in the selected body map slot."""
+        slot = self._body_map_selected_slot
+        if not slot:
+            return
+        for it in self.inv_data.get("equipment", []):
+            if it.get("armor_slot", "") == slot:
+                it["armor_slot"] = ""
+                self.inv_render("equipment")
+                self._refresh_body_map()
+                self.body_map_slot_name.set(slot)
+                self.body_map_item_name.set("Empty")
+                txt = self.body_map_details_text
+                txt.configure(state="normal")
+                txt.delete("1.0", tk.END)
+                txt.insert("1.0", "No item equipped in this slot.")
+                txt.configure(state="disabled")
+                return
+        messagebox.showinfo("Unequip", "This slot is already empty.")
+
+    def _refresh_body_map(self):
+        """Recolor body map slots based on current equipment assignments."""
+        if not hasattr(self, "body_canvas"):
+            return
+        colors = self._get_current_colors()
+        accent = colors.get("accent", "#569cd6")
+        empty_fill = colors.get("entry_bg", "#3c3c3c")
+        text_color = colors.get("fg", "#cccccc")
+
+        occupied_slots = set()
+        for it in self.inv_data.get("equipment", []):
+            slot = it.get("armor_slot", "")
+            if slot:
+                occupied_slots.add(slot)
+
+        for slot_name in ARMOR_SLOTS:
+            tag = f"slot_{slot_name}"
+            fill = accent if slot_name in occupied_slots else empty_fill
+            # Update shape fill colors
+            for item_id in self.body_canvas.find_withtag(tag):
+                item_type = self.body_canvas.type(item_id)
+                if item_type in ("rectangle", "oval"):
+                    self.body_canvas.itemconfigure(item_id, fill=fill)
+                elif item_type == "text":
+                    self.body_canvas.itemconfigure(item_id, fill=text_color)
+
+        # Update non-slot text labels
+        for item_id in self.body_canvas.find_withtag("body_text"):
+            self.body_canvas.itemconfigure(item_id, fill=text_color)
+
     def _build_inventory_category(self, parent, key: str):
         outer = ttk.Frame(parent)
         outer.pack(fill=tk.BOTH, expand=True)
@@ -2455,21 +3076,36 @@ class CharacterSheet(ttk.Frame):
         ttk.Label(details, text="Weight (lbs):").grid(row=2, column=0, sticky="w", padx=6, pady=4)
         ttk.Entry(details, textvariable=self.inv_weight[key], width=10).grid(row=2, column=1, sticky="w", padx=6, pady=4)
 
+        r = 3  # next row counter
+
+        # Armor Slot selector (equipment category only)
+        if key == "equipment":
+            ttk.Label(details, text="Armor Slot:").grid(row=r, column=0, sticky="w", padx=6, pady=4)
+            slot_values = ["(none)"] + ARMOR_SLOTS
+            ttk.Combobox(details, values=slot_values,
+                         textvariable=self.inv_armor_slot[key],
+                         state="readonly", width=20).grid(row=r, column=1, sticky="w", padx=6, pady=4)
+            r += 1
+
         ttk.Checkbutton(details, text="Ranged item (use Precision)", variable=self.inv_is_ranged[key]).grid(
-            row=3, column=0, columnspan=2, sticky="w", padx=6, pady=(2, 2)
+            row=r, column=0, columnspan=2, sticky="w", padx=6, pady=(2, 2)
         )
+        r += 1
 
         ttk.Checkbutton(details, text="Apply bonus (PBD melee / Precision ranged)", variable=self.inv_apply_bonus[key]).grid(
-            row=4, column=0, columnspan=2, sticky="w", padx=6, pady=(2, 2)
+            row=r, column=0, columnspan=2, sticky="w", padx=6, pady=(2, 2)
         )
+        r += 1
 
         ttk.Checkbutton(details, text="Growth Item", variable=self.inv_is_growth_item[key]).grid(
-            row=5, column=0, columnspan=2, sticky="w", padx=6, pady=(2, 6)
+            row=r, column=0, columnspan=2, sticky="w", padx=6, pady=(2, 6)
         )
+        r += 1
 
         # ---- Passive Stat Boosts section ----
         boost_frame = ttk.LabelFrame(details, text="Passive Stat Boosts (equipment only)")
-        boost_frame.grid(row=6, column=0, columnspan=2, sticky="ew", padx=6, pady=(2, 6))
+        boost_frame.grid(row=r, column=0, columnspan=2, sticky="ew", padx=6, pady=(2, 6))
+        r += 1
 
         boost_list = tk.Listbox(boost_frame, height=4, exportselection=False)
         boost_list.pack(fill=tk.X, padx=6, pady=(6, 2))
@@ -2497,7 +3133,8 @@ class CharacterSheet(ttk.Frame):
 
         # ---- Consumable section ----
         cons_frame = ttk.LabelFrame(details, text="Consumable")
-        cons_frame.grid(row=7, column=0, columnspan=2, sticky="ew", padx=6, pady=(2, 6))
+        cons_frame.grid(row=r, column=0, columnspan=2, sticky="ew", padx=6, pady=(2, 6))
+        r += 1
 
         ttk.Checkbutton(cons_frame, text="Consumable (removed on use)",
                          variable=self.inv_consumable[key]).grid(row=0, column=0, columnspan=4, sticky="w", padx=6, pady=(4, 2))
@@ -2520,18 +3157,22 @@ class CharacterSheet(ttk.Frame):
         ttk.Entry(cons_frame, textvariable=self.inv_consume_perm_value[key], width=6).grid(
             row=3, column=3, sticky="w", padx=(0, 6), pady=(2, 4))
 
-        ttk.Label(details, text="Notes:").grid(row=8, column=0, sticky="nw", padx=6, pady=4)
+        ttk.Label(details, text="Notes:").grid(row=r, column=0, sticky="nw", padx=6, pady=4)
         notes_box = tk.Text(details, wrap="word", height=4)
-        notes_box.grid(row=8, column=1, sticky="nsew", padx=6, pady=4)
+        notes_box.grid(row=r, column=1, sticky="nsew", padx=6, pady=4)
         setattr(self, f"inv_notes_box_{key}", notes_box)
         self._tk_widgets.append(notes_box)
+        notes_row = r
+        r += 1
 
         ttk.Button(details, text="Update Selected", command=lambda k=key: self.inv_update_selected(k)).grid(
-            row=9, column=1, sticky="w", padx=6, pady=(6, 8)
+            row=r, column=1, sticky="w", padx=6, pady=(6, 8)
         )
+        r += 1
 
         move_box = ttk.LabelFrame(details, text="Transfer")
-        move_box.grid(row=10, column=1, sticky="ew", padx=6, pady=(6, 8))
+        move_box.grid(row=r, column=1, sticky="ew", padx=6, pady=(6, 8))
+        r += 1
 
         ttk.Label(move_box, text="Move to:").pack(side=tk.LEFT, padx=(6, 4), pady=6)
 
@@ -2550,7 +3191,7 @@ class CharacterSheet(ttk.Frame):
         ).pack(side=tk.LEFT, padx=(6, 6), pady=6)
 
         json_row = ttk.Frame(details)
-        json_row.grid(row=11, column=1, sticky="w", padx=6, pady=(0, 8))
+        json_row.grid(row=r, column=1, sticky="w", padx=6, pady=(0, 8))
 
         ttk.Button(json_row, text="Copy JSON", command=lambda k=key: self.inv_copy_json_selected(k)).pack(side=tk.LEFT)
         ttk.Button(json_row, text="Import JSON…", command=lambda k=key: self.inv_import_json_dialog(k)).pack(side=tk.LEFT, padx=8)
@@ -2558,7 +3199,7 @@ class CharacterSheet(ttk.Frame):
             ttk.Button(json_row, text="Save to Library", command=lambda k=key: self.item_library_save_selected(k)).pack(side=tk.LEFT, padx=8)
 
         details.grid_columnconfigure(1, weight=1)
-        details.grid_rowconfigure(8, weight=1)
+        details.grid_rowconfigure(notes_row, weight=1)
 
     def _select_ref_in_listbox(self, lb: tk.Listbox, data_list: list, ref_obj):
         lb.selection_clear(0, tk.END)
@@ -2581,7 +3222,8 @@ class CharacterSheet(ttk.Frame):
             rng = " (R)" if it.get("is_ranged", False) else ""
             cons = " [C]" if it.get("consumable", False) else ""
             growth = " [G]" if it.get("is_growth_item", False) else ""
-            lb.insert(tk.END, f"{star}{it.get('name','')}{rng}{cons}{growth}")
+            slot = f" [{it['armor_slot']}]" if it.get("armor_slot", "") else ""
+            lb.insert(tk.END, f"{star}{it.get('name','')}{rng}{cons}{growth}{slot}")
 
         self._select_ref_in_listbox(lb, self.inv_data[key], selected_ref)
         self.refresh_combat_list()
@@ -2602,6 +3244,7 @@ class CharacterSheet(ttk.Frame):
             "stat_boosts": [],
             "is_growth_item": False,
             "weight": 0.0,
+            "armor_slot": "",
         })
         self.inv_new_name[key].set("")
         self.inv_render(key)
@@ -2620,6 +3263,7 @@ class CharacterSheet(ttk.Frame):
         self.inv_render(key)
         self._refresh_equipment_boosts_display()
         self._recount_growth_items()
+        self._refresh_body_map()
 
     def inv_toggle_favorite(self, key: str):
         lb: tk.Listbox = getattr(self, f"inv_list_{key}")
@@ -2673,6 +3317,10 @@ class CharacterSheet(ttk.Frame):
         # Load weight
         self.inv_weight[key].set(str(it.get("weight", 0)))
 
+        # Load armor slot
+        slot = it.get("armor_slot", "")
+        self.inv_armor_slot[key].set(slot if slot else "(none)")
+
         notes_box: tk.Text = getattr(self, f"inv_notes_box_{key}")
         notes_box.delete("1.0", tk.END)
         notes_box.insert(tk.END, it.get("notes", ""))
@@ -2716,6 +3364,20 @@ class CharacterSheet(ttk.Frame):
         except (ValueError, TypeError):
             it["weight"] = 0.0
 
+        # Save armor slot (with validation)
+        slot_display = self.inv_armor_slot[key].get()
+        new_slot = "" if slot_display == "(none)" else slot_display
+        if new_slot and key == "equipment":
+            for other_it in self.inv_data["equipment"]:
+                if other_it is not it and other_it.get("armor_slot", "") == new_slot:
+                    messagebox.showwarning(
+                        "Slot Occupied",
+                        f'The "{new_slot}" slot is already occupied by '
+                        f'"{other_it.get("name", "?")}". Unequip that item first.'
+                    )
+                    return
+        it["armor_slot"] = new_slot
+
         notes_box: tk.Text = getattr(self, f"inv_notes_box_{key}")
         it["notes"] = notes_box.get("1.0", tk.END).rstrip("\n")
 
@@ -2723,6 +3385,7 @@ class CharacterSheet(ttk.Frame):
         self._refresh_equipment_boosts_display()
         self._recount_growth_items()
         self._refresh_carry_display()
+        self._refresh_body_map()
 
     def inv_boost_render(self, key: str):
         """Refresh the boost listbox for the given inventory category."""
@@ -2883,6 +3546,10 @@ class CharacterSheet(ttk.Frame):
             self.inv_selected_ref[from_key] = None
             return
 
+        # Clear armor slot when moving out of equipment
+        if from_key == "equipment" and to_key != "equipment":
+            it["armor_slot"] = ""
+
         self.inv_data[to_key].append(it)
         self.inv_selected_ref[from_key] = None
 
@@ -2890,6 +3557,7 @@ class CharacterSheet(ttk.Frame):
         self.inv_render(to_key)
         self._refresh_equipment_boosts_display()
         self._recount_growth_items()
+        self._refresh_body_map()
 
     # ---------------- Abilities ----------------
 
@@ -4458,6 +5126,176 @@ class CharacterSheet(ttk.Frame):
         add_item_to_library(item_data, metadata)
         messagebox.showinfo("Library", f"Saved '{item_data.get('name', '')}' to item library.")
 
+    # ======================== Mob Generator Tab ========================
+
+    def _build_mob_generator_tab(self):
+        """Build the Mob Generator tab (DM tool)."""
+        frame = ttk.Frame(self.tab_mob_generator)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # --- Left panel: Configuration ---
+        left = ttk.LabelFrame(frame, text="Configuration")
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10), pady=0)
+
+        ttk.Label(left, text="Name (blank = random):").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        self.mob_name_var = tk.StringVar()
+        ttk.Entry(left, textvariable=self.mob_name_var, width=22).grid(row=0, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(left, text="Tier:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        self.mob_tier_var = tk.StringVar(value="T1")
+        ttk.Combobox(left, textvariable=self.mob_tier_var, values=["T1", "T2", "T3", "T4"],
+                     state="readonly", width=8).grid(row=1, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(left, text="Position:").grid(row=2, column=0, sticky="w", padx=6, pady=4)
+        self.mob_position_var = tk.StringVar(value="Mid")
+        ttk.Combobox(left, textvariable=self.mob_position_var,
+                     values=list(MOB_POSITION_RANGES.keys()),
+                     state="readonly", width=10).grid(row=2, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(left, text="Power Level:").grid(row=3, column=0, sticky="w", padx=6, pady=4)
+        self.mob_power_var = tk.StringVar(value="Average")
+        ttk.Combobox(left, textvariable=self.mob_power_var,
+                     values=list(MOB_POWER_MULTIPLIERS.keys()),
+                     state="readonly", width=16).grid(row=3, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Separator(left, orient="horizontal").grid(row=4, column=0, columnspan=2, sticky="ew", padx=6, pady=8)
+        ttk.Label(left, text="Combat Tags:", font=("TkDefaultFont", 10, "bold")).grid(
+            row=5, column=0, columnspan=2, sticky="w", padx=6, pady=4)
+
+        self.mob_tag_vars = {}
+        for i, tag in enumerate(MOB_COMBAT_TAGS):
+            var = tk.BooleanVar(value=False)
+            self.mob_tag_vars[tag] = var
+            ttk.Checkbutton(left, text=tag, variable=var).grid(
+                row=6 + i, column=0, columnspan=2, sticky="w", padx=20, pady=2)
+
+        ttk.Separator(left, orient="horizontal").grid(row=10, column=0, columnspan=2, sticky="ew", padx=6, pady=8)
+        ttk.Button(left, text="Generate Mob", command=self._mob_generate).grid(
+            row=11, column=0, columnspan=2, padx=6, pady=8)
+
+        # --- Right panel: Preview + Save ---
+        right = ttk.Frame(frame)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        ttk.Label(right, text="Preview", font=("TkDefaultFont", 12, "bold")).pack(anchor="w", pady=(0, 5))
+
+        self.mob_preview_text = tk.Text(right, wrap="word", state="disabled", height=30)
+        self.mob_preview_text.pack(fill=tk.BOTH, expand=True)
+        self._tk_widgets.append(self.mob_preview_text)
+
+        btn_frame = ttk.Frame(right)
+        btn_frame.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(btn_frame, text="Save as JSON...", command=self._mob_save).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Open in New Tab", command=self._mob_open_in_tab).pack(side=tk.LEFT, padx=(8, 0))
+
+        self._generated_mob = None
+
+    def _mob_generate(self):
+        """Handle the Generate Mob button click."""
+        name = self.mob_name_var.get().strip()
+        tier = self.mob_tier_var.get()
+        position = self.mob_position_var.get()
+        power = self.mob_power_var.get()
+        tags = [tag for tag, var in self.mob_tag_vars.items() if var.get()]
+
+        try:
+            mob = generate_mob_character(name, tier, position, power, tags)
+            self._generated_mob = mob
+            self._mob_update_preview(mob)
+        except Exception as e:
+            messagebox.showerror("Generation Error", f"Failed to generate mob:\n{e}")
+
+    def _mob_update_preview(self, mob: dict):
+        """Render the generated mob into the preview text widget."""
+        self.mob_preview_text.config(state="normal")
+        self.mob_preview_text.delete("1.0", tk.END)
+
+        lines = []
+        lines.append(f"Name: {mob['name']}")
+        lines.append(f"Tier: {mob['tier']}")
+        hp = mob["resources"]["hp"]
+        mana = mob["resources"]["mana"]
+        lines.append(f"HP: {hp['max']}    Mana: {mana['max']}")
+        lines.append("")
+        lines.append("--- Stats ---")
+        stat_label_map = {k: lbl for k, lbl in STAT_ORDER}
+        for k in STAT_KEYS:
+            label = stat_label_map.get(k, k)
+            lines.append(f"  {label}: {mob['stats'].get(k, 0)}")
+
+        lines.append("")
+        lines.append("--- Equipment ---")
+        equip = mob.get("inventory", {}).get("equipment", [])
+        if equip:
+            for item in equip:
+                iname = item.get("name", "?")
+                dmg = item.get("damage", "")
+                rng = "Ranged" if item.get("is_ranged") else "Melee"
+                dmg_str = f" {dmg}" if dmg else ""
+                lines.append(f"  {iname} ({rng}){dmg_str}")
+        else:
+            lines.append("  (none)")
+
+        lines.append("")
+        lines.append("--- Abilities ---")
+        abilities = mob.get("abilities", {})
+        has_any = False
+        for slot in ["core", "inner", "outer"]:
+            slot_abs = abilities.get(slot, [])
+            if slot_abs:
+                has_any = True
+                lines.append(f"  [{slot.capitalize()}]")
+                for ab in slot_abs:
+                    ab_name = ab.get("name", "?")
+                    ab_dmg = ab.get("damage", "")
+                    ab_mana = ab.get("mana_cost", 0)
+                    dmg_str = f" - {ab_dmg}" if ab_dmg else ""
+                    lines.append(f"    {ab_name}{dmg_str} (mana: {ab_mana})")
+        if not has_any:
+            lines.append("  (none)")
+
+        lines.append("")
+        lines.append("--- Notes ---")
+        lines.append(mob.get("notes", ""))
+
+        self.mob_preview_text.insert("1.0", "\n".join(lines))
+        self.mob_preview_text.config(state="disabled")
+
+    def _mob_save(self):
+        """Save the generated mob as a JSON file via file dialog."""
+        if not self._generated_mob:
+            messagebox.showinfo("Save", "Generate a mob first.")
+            return
+        default_name = self._generated_mob.get("name", "mob").replace(" ", "_")
+        path = filedialog.asksaveasfilename(
+            title="Save mob as character JSON",
+            initialfile=f"{default_name}.json",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+        if path:
+            save_character(self._generated_mob, Path(path))
+            messagebox.showinfo("Saved", f"Mob saved to {Path(path).name}")
+
+    def _mob_open_in_tab(self):
+        """Save the generated mob to a file and open it as a new character tab."""
+        if not self._generated_mob:
+            messagebox.showinfo("Open", "Generate a mob first.")
+            return
+        default_name = self._generated_mob.get("name", "mob").replace(" ", "_")
+        path = filedialog.asksaveasfilename(
+            title="Save mob and open as character tab",
+            initialfile=f"{default_name}.json",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+        if path:
+            p = Path(path)
+            save_character(self._generated_mob, p)
+            app = self.winfo_toplevel()
+            if hasattr(app, "_add_character_tab"):
+                app._add_character_tab(p)
+
     # ---------------- Combat Quick Use ----------------
 
     def refresh_combat_list(self):
@@ -5483,6 +6321,7 @@ class CharacterSheet(ttk.Frame):
             self.inv_consume_perm_value[k].set("0")
             self.inv_is_growth_item[k].set(False)
             self.inv_weight[k].set("0")
+            self.inv_armor_slot[k].set("(none)")
             nb: tk.Text = getattr(self, f"inv_notes_box_{k}")
             nb.delete("1.0", tk.END)
 
@@ -5537,6 +6376,7 @@ class CharacterSheet(ttk.Frame):
 
         self.var_hit_result.set("")
         self._refresh_equipment_boosts_display()
+        self._refresh_body_map()
 
     def apply_to_model(self):
         c = self.char
@@ -5608,6 +6448,9 @@ class CharacterSheet(ttk.Frame):
                 w = float(it.get("weight", 0) or 0)
                 if w:
                     item_dict["weight"] = w
+                slot = it.get("armor_slot", "")
+                if slot:
+                    item_dict["armor_slot"] = slot
                 cleaned.append(item_dict)
             inv[k] = cleaned
 
