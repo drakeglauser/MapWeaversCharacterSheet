@@ -386,6 +386,28 @@ MOB_MANA_RANGES = {
     "T4": (500, 1200),
 }
 
+# NPC ranges -- human-level (1x), roughly half of monster ranges
+NPC_STAT_RANGES = {
+    "T1": (5, 15),
+    "T2": (15, 30),
+    "T3": (30, 55),
+    "T4": (55, 100),
+}
+
+NPC_HP_RANGES = {
+    "T1": (20, 100),
+    "T2": (80, 250),
+    "T3": (200, 500),
+    "T4": (400, 1000),
+}
+
+NPC_MANA_RANGES = {
+    "T1": (10, 50),
+    "T2": (40, 120),
+    "T3": (100, 300),
+    "T4": (250, 600),
+}
+
 MOB_POSITION_RANGES = {
     "Bottom": (0.0, 0.15),
     "Low":    (0.15, 0.35),
@@ -1217,16 +1239,28 @@ def _select_mob_spells(tags: list, tier: str) -> dict:
 
 
 def generate_mob_character(name: str, tier: str, position: str,
-                           power_level: str, tags: list) -> dict:
+                           power_level: str, tags: list,
+                           creature_type: str = "Monster") -> dict:
     """Generate a complete character dict for a mob/NPC.
 
+    creature_type: "Monster" (2x human stats) or "NPC" (human-level stats).
     Returns a dict matching default_character_template() schema.
     """
     if not name.strip():
         name = random.choice(MOB_NAME_PREFIXES) + " " + random.choice(MOB_NAME_BASES)
 
+    # Pick stat tables based on creature type
+    if creature_type == "NPC":
+        stat_ranges = NPC_STAT_RANGES
+        hp_ranges = NPC_HP_RANGES
+        mana_ranges = NPC_MANA_RANGES
+    else:
+        stat_ranges = MOB_STAT_RANGES
+        hp_ranges = MOB_HP_RANGES
+        mana_ranges = MOB_MANA_RANGES
+
     # Base stat calculation
-    stat_lo, stat_hi = MOB_STAT_RANGES.get(tier, (5, 15))
+    stat_lo, stat_hi = stat_ranges.get(tier, (5, 15))
     pos_lo, pos_hi = MOB_POSITION_RANGES.get(position, (0.35, 0.55))
     power_mult = MOB_POWER_MULTIPLIERS.get(power_level, 1.0)
     pos_factor = random.uniform(pos_lo, pos_hi)
@@ -1254,8 +1288,8 @@ def generate_mob_character(name: str, tier: str, position: str,
         stats[k] = max(0, int(round(val)))
 
     # Generate HP and Mana
-    hp_lo, hp_hi = MOB_HP_RANGES.get(tier, (20, 100))
-    mana_lo, mana_hi = MOB_MANA_RANGES.get(tier, (10, 50))
+    hp_lo, hp_hi = hp_ranges.get(tier, (20, 100))
+    mana_lo, mana_hi = mana_ranges.get(tier, (10, 50))
     hp_max = max(1, int(round(
         (hp_lo + (hp_hi - hp_lo) * pos_factor) * power_mult * random.uniform(0.9, 1.1)
     )))
@@ -1276,7 +1310,7 @@ def generate_mob_character(name: str, tier: str, position: str,
     char["inventory"]["equipment"] = equipment
     char["abilities"] = abilities
     tag_str = ", ".join(tags) if tags else "none"
-    char["notes"] = f"Generated mob: {power_level} {position} {tier}, tags: {tag_str}"
+    char["notes"] = f"Generated {creature_type}: {power_level} {position} {tier}, tags: {tag_str}"
     return char
 
 
@@ -2266,7 +2300,7 @@ class CharacterSheet(ttk.Frame):
         c_left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
         c_right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.combat_list = tk.Listbox(c_left, height=14)
+        self.combat_list = tk.Listbox(c_left, height=14, exportselection=False)
         self.combat_list.pack(fill=tk.BOTH, expand=True)
         self.combat_list.bind("<<ListboxSelect>>", lambda _e: self.on_combat_select())
         self._tk_widgets.append(self.combat_list)
@@ -5137,41 +5171,46 @@ class CharacterSheet(ttk.Frame):
         left = ttk.LabelFrame(frame, text="Configuration")
         left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10), pady=0)
 
-        ttk.Label(left, text="Name (blank = random):").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        self.mob_name_var = tk.StringVar()
-        ttk.Entry(left, textvariable=self.mob_name_var, width=22).grid(row=0, column=1, sticky="w", padx=6, pady=4)
+        ttk.Label(left, text="Type:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        self.mob_type_var = tk.StringVar(value="Monster")
+        ttk.Combobox(left, textvariable=self.mob_type_var, values=["Monster", "NPC"],
+                     state="readonly", width=10).grid(row=0, column=1, sticky="w", padx=6, pady=4)
 
-        ttk.Label(left, text="Tier:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        ttk.Label(left, text="Name (blank = random):").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        self.mob_name_var = tk.StringVar()
+        ttk.Entry(left, textvariable=self.mob_name_var, width=22).grid(row=1, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(left, text="Tier:").grid(row=2, column=0, sticky="w", padx=6, pady=4)
         self.mob_tier_var = tk.StringVar(value="T1")
         ttk.Combobox(left, textvariable=self.mob_tier_var, values=["T1", "T2", "T3", "T4"],
-                     state="readonly", width=8).grid(row=1, column=1, sticky="w", padx=6, pady=4)
+                     state="readonly", width=8).grid(row=2, column=1, sticky="w", padx=6, pady=4)
 
-        ttk.Label(left, text="Position:").grid(row=2, column=0, sticky="w", padx=6, pady=4)
+        ttk.Label(left, text="Position:").grid(row=3, column=0, sticky="w", padx=6, pady=4)
         self.mob_position_var = tk.StringVar(value="Mid")
         ttk.Combobox(left, textvariable=self.mob_position_var,
                      values=list(MOB_POSITION_RANGES.keys()),
-                     state="readonly", width=10).grid(row=2, column=1, sticky="w", padx=6, pady=4)
+                     state="readonly", width=10).grid(row=3, column=1, sticky="w", padx=6, pady=4)
 
-        ttk.Label(left, text="Power Level:").grid(row=3, column=0, sticky="w", padx=6, pady=4)
+        ttk.Label(left, text="Power Level:").grid(row=4, column=0, sticky="w", padx=6, pady=4)
         self.mob_power_var = tk.StringVar(value="Average")
         ttk.Combobox(left, textvariable=self.mob_power_var,
                      values=list(MOB_POWER_MULTIPLIERS.keys()),
-                     state="readonly", width=16).grid(row=3, column=1, sticky="w", padx=6, pady=4)
+                     state="readonly", width=16).grid(row=4, column=1, sticky="w", padx=6, pady=4)
 
-        ttk.Separator(left, orient="horizontal").grid(row=4, column=0, columnspan=2, sticky="ew", padx=6, pady=8)
+        ttk.Separator(left, orient="horizontal").grid(row=5, column=0, columnspan=2, sticky="ew", padx=6, pady=8)
         ttk.Label(left, text="Combat Tags:", font=("TkDefaultFont", 10, "bold")).grid(
-            row=5, column=0, columnspan=2, sticky="w", padx=6, pady=4)
+            row=6, column=0, columnspan=2, sticky="w", padx=6, pady=4)
 
         self.mob_tag_vars = {}
         for i, tag in enumerate(MOB_COMBAT_TAGS):
             var = tk.BooleanVar(value=False)
             self.mob_tag_vars[tag] = var
             ttk.Checkbutton(left, text=tag, variable=var).grid(
-                row=6 + i, column=0, columnspan=2, sticky="w", padx=20, pady=2)
+                row=7 + i, column=0, columnspan=2, sticky="w", padx=20, pady=2)
 
-        ttk.Separator(left, orient="horizontal").grid(row=10, column=0, columnspan=2, sticky="ew", padx=6, pady=8)
-        ttk.Button(left, text="Generate Mob", command=self._mob_generate).grid(
-            row=11, column=0, columnspan=2, padx=6, pady=8)
+        ttk.Separator(left, orient="horizontal").grid(row=11, column=0, columnspan=2, sticky="ew", padx=6, pady=8)
+        ttk.Button(left, text="Generate", command=self._mob_generate).grid(
+            row=12, column=0, columnspan=2, padx=6, pady=8)
 
         # --- Right panel: Preview + Save ---
         right = ttk.Frame(frame)
@@ -5191,15 +5230,17 @@ class CharacterSheet(ttk.Frame):
         self._generated_mob = None
 
     def _mob_generate(self):
-        """Handle the Generate Mob button click."""
+        """Handle the Generate button click."""
         name = self.mob_name_var.get().strip()
         tier = self.mob_tier_var.get()
         position = self.mob_position_var.get()
         power = self.mob_power_var.get()
+        creature_type = self.mob_type_var.get()
         tags = [tag for tag, var in self.mob_tag_vars.items() if var.get()]
 
         try:
-            mob = generate_mob_character(name, tier, position, power, tags)
+            mob = generate_mob_character(name, tier, position, power, tags,
+                                         creature_type=creature_type)
             self._generated_mob = mob
             self._mob_update_preview(mob)
         except Exception as e:
