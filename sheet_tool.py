@@ -19,7 +19,7 @@ if getattr(sys, 'frozen', False):
 
 import tkinter as tk
 import tkinter.font as tkFont
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
 
 # ---------------- Theme / Dark Mode ----------------
 
@@ -33,6 +33,7 @@ DARK_COLORS = {
     "accent": "#569cd6",
     "gray": "#808080",
     "red": "#f44747",
+    "green": "#4ec94e",
     "frame_bg": "#252526",
     "button_bg": "#3c3c3c",
     "canvas_bg": "#1e1e1e",
@@ -53,6 +54,7 @@ LIGHT_COLORS = {
     "accent": "#0078d7",
     "gray": "gray",
     "red": "red",
+    "green": "#1a7f1a",
     "frame_bg": "#f0f0f0",
     "button_bg": "#e1e1e1",
     "canvas_bg": "#ffffff",
@@ -142,6 +144,8 @@ def apply_ttk_theme(style: ttk.Style, colors: dict):
                      foreground=colors["gray"])
     style.configure("Red.TLabel", background=colors["bg"],
                      foreground=colors["red"])
+    style.configure("Green.TLabel", background=colors["bg"],
+                     foreground=colors.get("green", colors["fg"]))
 
 
 def style_tk_widget(widget, colors: dict):
@@ -299,6 +303,36 @@ TIER_DICE = {
 }
 
 DEFAULT_TIER_DICE = {"min": 4, "max": 6, "count_range": (1, 2)}
+
+# ---------- Tier system (see Context/tier_rules.md) ----------
+# Active development scope: T1-T5. The world has up to 50 tiers, but no special
+# logic is built beyond T5 yet; helpers clamp to MAX_DEFINED_TIER.
+TIER_BUDGETS = {1: 100, 2: 500, 3: 2000, 4: 10000, 5: 50000}
+MAX_DEFINED_TIER = 5
+
+# Perm-buff consumable pool cap, as fractions of the tier budget.
+PERM_BUFF_SOFT_FRAC = 0.70   # warn above this
+PERM_BUFF_HARD_FRAC = 0.85   # blocked at/above this
+PERM_BUFF_TAPER_EXP = 2      # squared = accelerating diminishing returns in the soft..hard zone
+
+# Tier-up bonus: granted points = floor(BONUS_FRAC * lifetime normal points earned).
+TIERUP_BONUS_FRAC = 0.50
+
+# Cross-tier status-effect potency multiplier base: mult = CROSS_TIER_BASE ** (src - tgt).
+CROSS_TIER_BASE = 2.0
+
+# Player-facing tier progress bands: (low_fraction_inclusive, high_fraction_exclusive, label).
+TIER_PROGRESS_BANDS = [
+    (0.00, 0.10, "Bottom"),
+    (0.10, 0.20, "Bottom-Low"),
+    (0.20, 0.30, "Low"),
+    (0.30, 0.40, "Low-Mid"),
+    (0.40, 0.55, "Mid"),
+    (0.55, 0.65, "Mid-High"),
+    (0.65, 0.80, "High"),
+    (0.80, 0.95, "High-Peak"),
+    (0.95, 1.01, "Peak"),
+]
 
 KEYWORD_TO_ELEMENT = {
     # Fire family
@@ -679,6 +713,117 @@ def phys_dr_from_points(phys_def_points: int) -> int:
     return max(0, p // 5)
 
 
+# ---------------- Tier helpers (see Context/tier_rules.md) ----------------
+
+def tier_num(tier) -> int:
+    """Parse a tier into its integer (e.g. 'T3' -> 3, 3 -> 3, '3' -> 3). Defaults to 1."""
+    if isinstance(tier, int):
+        return max(1, tier)
+    if isinstance(tier, str):
+        m = re.search(r'\d+', tier)
+        if m:
+            return max(1, int(m.group()))
+    return 1
+
+
+def tier_budget(n: int) -> int:
+    """Total normal-earned-point budget at tier n (clamped to the defined tiers)."""
+    n = max(1, min(int(n), MAX_DEFINED_TIER))
+    return TIER_BUDGETS.get(n, TIER_BUDGETS[MAX_DEFINED_TIER])
+
+
+def tier_floor(n: int) -> int:
+    """Floor of tier n's progress band = the previous tier's budget (0 for T1)."""
+    n = int(n)
+    return tier_budget(n - 1) if n > 1 else 0
+
+
+def tier_slot_maxes(n: int) -> dict:
+    """Ability slot caps at tier n: Core 7 (+1 every 2 tiers), Inner 9 (+1/tier),
+    Outer 11 (+2/tier). Formulas extend past T5; only T1-T5 are in active scope."""
+    n = max(1, int(n))
+    return {
+        "core": 7 + (n - 1) // 2,
+        "inner": 9 + (n - 1),
+        "outer": 11 + 2 * (n - 1),
+    }
+
+
+def perm_buff_caps(n: int) -> tuple:
+    """(soft, hard) perm-buff pool caps for tier n, as point totals."""
+    b = tier_budget(n)
+    return int(PERM_BUFF_SOFT_FRAC * b), int(PERM_BUFF_HARD_FRAC * b)
+
+
+def perm_buff_point_value(pool: float, n: int) -> float:
+    """Effective value (0.0-1.0) of the *next* perm-buff stat point given the current
+    pool total at tier n. Full value below the soft cap (70% of budget), accelerating
+    (squared) diminishing returns through the soft..hard zone, 0 at/after the hard cap (85%)."""
+    b = tier_budget(n)
+    if b <= 0:
+        return 1.0
+    p = pool / b
+    if p <= PERM_BUFF_SOFT_FRAC:
+        return 1.0
+    if p >= PERM_BUFF_HARD_FRAC:
+        return 0.0
+    frac = (PERM_BUFF_HARD_FRAC - p) / (PERM_BUFF_HARD_FRAC - PERM_BUFF_SOFT_FRAC)
+    return frac ** PERM_BUFF_TAPER_EXP
+
+
+def cross_tier_mult(source_tier, target_tier) -> float:
+    """Status-effect potency multiplier = CROSS_TIER_BASE ** (source - target). Always > 0."""
+    return CROSS_TIER_BASE ** (tier_num(source_tier) - tier_num(target_tier))
+
+
+def tierup_bonus_points(normal_earned_lifetime: int) -> int:
+    """One-time bonus points granted on tier-up = floor(50% of lifetime normal earned)."""
+    return int(max(0, _safe_int(normal_earned_lifetime, 0)) * TIERUP_BONUS_FRAC)
+
+
+def tier_progress(total_normal_points: int, n: int) -> tuple:
+    """Return (fraction 0.0-1.0, band_label) for progress within tier n, where
+    total_normal_points is the cumulative normal points spent."""
+    floor = tier_floor(n)
+    ceil = tier_budget(n)
+    span = ceil - floor
+    if span <= 0:
+        frac = 1.0
+    else:
+        frac = (_safe_int(total_normal_points, 0) - floor) / span
+    frac = clamp(frac, 0.0, 1.0)
+    label = "Peak"
+    for lo, hi, name in TIER_PROGRESS_BANDS:
+        if lo <= frac < hi:
+            label = name
+            break
+    return frac, label
+
+
+def apply_perm_buff_gain(pool: int, n: int, points: int) -> tuple:
+    """Add `points` nominal perm-buff stat points starting from the current `pool`
+    at tier n, applying the soft/diminishing/hard rules from Section 1.5.
+
+    Returns (effective_gain, new_pool, points_applied):
+      - effective_gain: the actual stat granted (int), after diminishing returns
+      - new_pool: the updated pool total (nominal points accepted)
+      - points_applied: how many nominal points were accepted before the hard cap
+    Points beyond the hard cap are rejected (points_applied < points)."""
+    pool = _safe_int(pool, 0)
+    points = _safe_int(points, 0)
+    _, hard = perm_buff_caps(n)
+    gain = 0.0
+    applied = 0
+    p = pool
+    for _ in range(max(0, points)):
+        if p >= hard:
+            break
+        gain += perm_buff_point_value(p, n)
+        p += 1
+        applied += 1
+    return _round_half_away(gain), p, applied
+
+
 # ---------------- Data schema helpers ----------------
 
 def default_character_template(name="New Hero"):
@@ -692,9 +837,15 @@ def default_character_template(name="New Hero"):
         },
         "stats": {k: (0 if k == "mana_density" else 5) for k in STAT_KEYS},
         "skills": {
-            "core": {"current": 0, "max": 2},
-            "inner": {"current": 0, "max": 5},
-            "outer": {"current": 0, "max": 9},
+            "core": {"current": 0, "max": 7},
+            "inner": {"current": 0, "max": 9},
+            "outer": {"current": 0, "max": 11},
+        },
+        "tier_points": {
+            "normal_earned_lifetime": 0,   # cumulative normal points earned-and-spent (budget/progress + bonus)
+            "tierup_bonus_pool": 0,        # spendable tier-up bonus points (not counted vs budget)
+            "perm_buff_pool": 0,           # running total of stat gained from perm-buff consumables
+            "initialized": True,           # new chars start tracked at 0; old saves prompt for their history
         },
         "growth_items": {"bound_current": 0, "bound_max": 4},
         "inventory": {"equipment": [], "bag": [], "storage": []},
@@ -765,6 +916,39 @@ def _migrate_stats_schema(char: dict):
         del res["mana_density"]
 
 
+def _migrate_tier_schema(char: dict):
+    """Backfill tier-system fields (see Context/tier_rules.md) on older saves and
+    recompute ability slot maxes from the character's tier. Backward-compatible:
+    missing fields default to 0; nothing is removed."""
+    if not isinstance(char, dict):
+        return
+
+    was_absent = not isinstance(char.get("tier_points"), dict)
+    tp = char.get("tier_points")
+    if not isinstance(tp, dict):
+        tp = {}
+    for key in ("normal_earned_lifetime", "tierup_bonus_pool", "perm_buff_pool"):
+        tp[key] = _safe_int(tp.get(key), 0)
+    # A save with no tier_points block predates point tracking -> flag for a one-time
+    # history prompt (initialized False). A block that already exists keeps its flag.
+    tp["initialized"] = bool(tp.get("initialized", not was_absent))
+    char["tier_points"] = tp
+
+    # Recompute slot maxes from tier (agreed: tier-derived maxes replace old hand-set ones).
+    maxes = tier_slot_maxes(tier_num(char.get("tier", "T1")))
+    skills = char.get("skills")
+    if not isinstance(skills, dict):
+        skills = {}
+    for slot in ("core", "inner", "outer"):
+        s = skills.get(slot)
+        if not isinstance(s, dict):
+            s = {}
+        s["max"] = maxes[slot]
+        s["current"] = _safe_int(s.get("current"), 0)
+        skills[slot] = s
+    char["skills"] = skills
+
+
 def sort_favorites_first(items):
     return sorted(items, key=lambda it: (not bool(it.get("favorite", False)), it.get("name", "").lower()))
 
@@ -801,6 +985,23 @@ def _safe_int(v, default=0):
         return int(v or default)
     except (ValueError, TypeError):
         return default
+
+
+def _round_half_away(x: float) -> int:
+    """Round to nearest int, ties away from zero. Symmetric for +/- values
+    so that e.g. +10% and -10% on the same base move it by the same magnitude."""
+    return int(math.floor(x + 0.5)) if x >= 0 else int(math.ceil(x - 0.5))
+
+
+def apply_boost_value(base: float, flat: float, pct: float) -> int:
+    """Apply a flat boost and a percent boost to a base value.
+
+    - Percent is taken against the base only (not base+flat). Multiple percent
+      boosts are summed additively before being passed in as `pct`.
+    - Only the FINAL output is rounded (ties away from zero), so fractional
+      flat or percent contributions don't get truncated away.
+    """
+    return _round_half_away(base + flat + base * pct / 100.0)
 
 
 def ensure_item_obj(x):
@@ -1949,6 +2150,7 @@ class CharacterSheet(ttk.Frame):
         # ----- Vars -----
         self.var_name = tk.StringVar()
         self.var_tier = tk.StringVar()
+        self.var_tier_progress = tk.StringVar(value="")  # band label (+ DM number)
 
         self.var_hp_current = tk.StringVar()
         self.var_hp_max = tk.StringVar()
@@ -1975,6 +2177,9 @@ class CharacterSheet(ttk.Frame):
         self.var_stats = {k: tk.StringVar() for k in STAT_KEYS}
         self.var_equip_bonus = {k: tk.StringVar() for k in STAT_KEYS}  # display equipment boost text
         self.var_equip_bonus_res = {"hp_max": tk.StringVar(), "mana_max": tk.StringVar()}
+        # Label widget refs so boost text can be recolored (red=net down, green=net up)
+        self.lbl_equip_bonus = {}
+        self.lbl_equip_bonus_res = {}
 
         self.var_growth_current = tk.StringVar()
         self.var_growth_max = tk.StringVar()
@@ -2094,6 +2299,17 @@ class CharacterSheet(ttk.Frame):
 
         ttk.Label(top, text="Tier:").pack(side=tk.LEFT, padx=(15, 0))
         ttk.Entry(top, textvariable=self.var_tier, width=10).pack(side=tk.LEFT, padx=5)
+
+        # Tier progress (Stage 3): vague band for players, exact number for DMs.
+        ttk.Label(top, text="Progress:").pack(side=tk.LEFT, padx=(15, 2))
+        self.tier_progress_bar = ttk.Progressbar(top, orient="horizontal",
+                                                  length=120, mode="determinate", maximum=100)
+        self.tier_progress_bar.pack(side=tk.LEFT)
+        ttk.Label(top, textvariable=self.var_tier_progress, style="Gray.TLabel").pack(side=tk.LEFT, padx=(6, 0))
+        # Advance Tier button: created hidden, shown by _refresh_advance_button at the cap.
+        self.btn_advance_tier = ttk.Button(top, text="Advance Tier ⬆", command=self.advance_tier)
+        # Live-refresh the bar when the tier field is edited.
+        self.var_tier.trace_add("write", lambda *a: self._refresh_tier_progress())
 
         ttk.Button(top, text="Save", command=self.on_save).pack(side=tk.RIGHT)
 
@@ -2229,8 +2445,10 @@ class CharacterSheet(ttk.Frame):
             if key == "mana_density":
                 ttk.Label(stats_frame, textvariable=self.var_mana_density_mult, foreground="gray").grid(
                     row=row, column=2, sticky="w", padx=(4, 0), pady=2)
-            ttk.Label(stats_frame, textvariable=self.var_equip_bonus[key],
-                      foreground="gray").grid(row=row, column=3, sticky="w", padx=(4, 0), pady=2)
+            _eb_lbl = ttk.Label(stats_frame, textvariable=self.var_equip_bonus[key],
+                                style="Gray.TLabel")
+            _eb_lbl.grid(row=row, column=3, sticky="w", padx=(4, 0), pady=2)
+            self.lbl_equip_bonus[key] = _eb_lbl
 
         # Currency summary
         currency_frame = ttk.LabelFrame(left, text="Currency")
@@ -2246,15 +2464,19 @@ class CharacterSheet(ttk.Frame):
         ttk.Entry(res_frame, textvariable=self.var_hp_current, width=6).grid(row=0, column=1)
         ttk.Label(res_frame, text="/").grid(row=0, column=2)
         ttk.Entry(res_frame, textvariable=self.var_hp_max, width=6).grid(row=0, column=3)
-        ttk.Label(res_frame, textvariable=self.var_equip_bonus_res["hp_max"],
-                  foreground="gray").grid(row=0, column=4, sticky="w", padx=(4, 0), pady=3)
+        _hpmax_lbl = ttk.Label(res_frame, textvariable=self.var_equip_bonus_res["hp_max"],
+                               style="Gray.TLabel")
+        _hpmax_lbl.grid(row=0, column=4, sticky="w", padx=(4, 0), pady=3)
+        self.lbl_equip_bonus_res["hp_max"] = _hpmax_lbl
 
         ttk.Label(res_frame, text="Mana:").grid(row=1, column=0, sticky="w", padx=4, pady=3)
         ttk.Entry(res_frame, textvariable=self.var_mana_current, width=6).grid(row=1, column=1)
         ttk.Label(res_frame, text="/").grid(row=1, column=2)
         ttk.Entry(res_frame, textvariable=self.var_mana_max, width=6).grid(row=1, column=3)
-        ttk.Label(res_frame, textvariable=self.var_equip_bonus_res["mana_max"],
-                  foreground="gray").grid(row=1, column=4, sticky="w", padx=(4, 0), pady=3)
+        _manamax_lbl = ttk.Label(res_frame, textvariable=self.var_equip_bonus_res["mana_max"],
+                                 style="Gray.TLabel")
+        _manamax_lbl.grid(row=1, column=4, sticky="w", padx=(4, 0), pady=3)
+        self.lbl_equip_bonus_res["mana_max"] = _manamax_lbl
 
         ttk.Label(res_frame, text="Heal:").grid(row=2, column=0, sticky="w", padx=4, pady=3)
         ttk.Entry(res_frame, textvariable=self.var_hp_heal, width=8).grid(row=2, column=1, sticky="w")
@@ -2987,37 +3209,44 @@ class CharacterSheet(ttk.Frame):
         self._body_map_selected_slot = clicked_slot
         self.body_map_slot_name.set(clicked_slot)
 
+        # Build details as (text, tag) segments so negative boosts can show red.
+        segments = []  # list of (line_text, tag) where tag in (None, "neg", "pos")
         if equipped_item:
             self.body_map_item_name.set(f"Equipped: {equipped_item.get('name', '?')}")
-            details_parts = []
             if equipped_item.get("roll_type", "None") != "None":
-                details_parts.append(f"Roll: {equipped_item['roll_type']}")
+                segments.append((f"Roll: {equipped_item['roll_type']}", None))
             if equipped_item.get("damage"):
-                details_parts.append(f"Damage: {equipped_item['damage']}")
+                segments.append((f"Damage: {equipped_item['damage']}", None))
             boosts = equipped_item.get("stat_boosts", [])
             if boosts:
-                details_parts.append("\nStat Boosts:")
+                segments.append(("\nStat Boosts:", None))
                 stat_label_map = dict(BOOST_TARGET_LABELS)
                 for b in boosts:
                     stat_name = stat_label_map.get(b["stat"], b["stat"])
-                    if b["mode"] == "percent":
-                        details_parts.append(f"  {stat_name}: {b['value']:+g}%")
-                    else:
-                        details_parts.append(f"  {stat_name}: {b['value']:+g}")
+                    val = b.get("value", 0)
+                    suffix = "%" if b["mode"] == "percent" else ""
+                    tag = "neg" if val < 0 else ("pos" if val > 0 else None)
+                    segments.append((f"  {stat_name}: {val:+g}{suffix}", tag))
             w = float(equipped_item.get("weight", 0) or 0)
             if w:
-                details_parts.append(f"\nWeight: {w} lbs")
+                segments.append((f"\nWeight: {w} lbs", None))
             if equipped_item.get("notes"):
-                details_parts.append(f"\nNotes:\n{equipped_item['notes']}")
-            details_text = "\n".join(details_parts) if details_parts else "(no combat stats)"
+                segments.append((f"\nNotes:\n{equipped_item['notes']}", None))
+            if not segments:
+                segments.append(("(no combat stats)", None))
         else:
             self.body_map_item_name.set("Empty")
-            details_text = "No item equipped in this slot."
+            segments.append(("No item equipped in this slot.", None))
 
+        colors = self._get_current_colors()
         txt = self.body_map_details_text
         txt.configure(state="normal")
         txt.delete("1.0", tk.END)
-        txt.insert("1.0", details_text)
+        txt.tag_configure("neg", foreground=colors.get("red", "#f44747"))
+        txt.tag_configure("pos", foreground=colors.get("green", colors.get("fg", "#cccccc")))
+        for i, (line, tag) in enumerate(segments):
+            prefix = "" if i == 0 else "\n"
+            txt.insert(tk.END, prefix + line, (tag,) if tag else ())
         txt.configure(state="disabled")
 
     def _body_map_unequip(self):
@@ -5733,6 +5962,35 @@ class CharacterSheet(ttk.Frame):
         results = []
         name = ref.get("name", "item")
 
+        # ---- Perm-buff pool cap pre-check (Section 1.5) ----
+        # Only positive permanent boosts to the 12 combat stats count toward the
+        # pool. If the pool is already at the tier's hard cap, block the consume
+        # (DM may override) so the item isn't wasted.
+        perm_override = False
+        _pre_stat = ref.get("consume_perm_stat", "")
+        _pre_val = _safe_int(ref.get("consume_perm_value"), 0)
+        if _pre_stat in STAT_KEYS and _pre_val > 0:
+            tp = self.char.setdefault("tier_points", {})
+            pool = _safe_int(tp.get("perm_buff_pool"), 0)
+            n = tier_num(self.var_tier.get())
+            _, hard = perm_buff_caps(n)
+            if pool >= hard:
+                if self.is_dm and messagebox.askyesno(
+                    "Perm-Buff Pool Cap",
+                    f"This character's permanent-buff pool ({pool}) is at the hard cap "
+                    f"for {self.var_tier.get()} ({hard}).\n\nOverride and apply the full "
+                    f"{_pre_val:+d} anyway?"
+                ):
+                    perm_override = True
+                else:
+                    if not self.is_dm:
+                        messagebox.showwarning(
+                            "Perm-Buff Pool Cap",
+                            "This character can't gain more permanent stats from "
+                            "consumables right now (cap reached). It may help to advance a tier."
+                        )
+                    return
+
         # Instant HP heal
         heal_hp = _safe_int(ref.get("consume_heal_hp"), 0)
         if heal_hp > 0:
@@ -5769,30 +6027,64 @@ class CharacterSheet(ttk.Frame):
             results.append(f"buff {turns} turns")
             self._render_active_buffs()
 
-        # Permanent stat increase
+        # Permanent stat change (can be negative)
         perm_stat = ref.get("consume_perm_stat", "")
         perm_val = _safe_int(ref.get("consume_perm_value"), 0)
         if perm_stat and perm_val:
+            def _cur_int(var, default=0):
+                try:
+                    return int(var.get().strip() or "0")
+                except ValueError:
+                    return default
+
             if perm_stat in STAT_KEYS:
-                try:
-                    cur = int(self.var_stats[perm_stat].get().strip() or "0")
-                except ValueError:
-                    cur = 0
-                self.var_stats[perm_stat].set(str(cur + perm_val))
+                cur = _cur_int(self.var_stats[perm_stat])
+                if perm_val > 0:
+                    # Positive perm gains run through the pool + diminishing returns.
+                    tp = self.char.setdefault("tier_points", {})
+                    pool = _safe_int(tp.get("perm_buff_pool"), 0)
+                    n = tier_num(self.var_tier.get())
+                    soft, hard = perm_buff_caps(n)
+                    if perm_override:
+                        gain, new_pool, applied = perm_val, pool + perm_val, perm_val
+                    else:
+                        gain, new_pool, applied = apply_perm_buff_gain(pool, n, perm_val)
+                    self.var_stats[perm_stat].set(str(max(0, cur + gain)))
+                    tp["perm_buff_pool"] = new_pool
+                    stat_label = dict(BOOST_TARGET_LABELS).get(perm_stat, perm_stat)
+                    note = f"{stat_label} permanently +{gain}"
+                    if gain != perm_val:
+                        note += f" (diminished from +{perm_val})"
+                    if applied < perm_val and not perm_override:
+                        note += " [pool cap reached]"
+                    elif new_pool >= soft:
+                        note += " [over soft cap]"
+                    results.append(note)
+                else:
+                    # Negative perm change: applies at full value, does not touch the pool.
+                    self.var_stats[perm_stat].set(str(max(0, cur + perm_val)))
+                    stat_label = dict(BOOST_TARGET_LABELS).get(perm_stat, perm_stat)
+                    results.append(f"{stat_label} permanently {perm_val:+d}")
             elif perm_stat == "hp_max":
-                try:
-                    cur = int(self.var_hp_max.get().strip() or "0")
-                except ValueError:
-                    cur = 0
-                self.var_hp_max.set(str(cur + perm_val))
+                # Raise base max; on a gain also grant the HP now, on a loss
+                # re-clamp current to the new effective max so it can't exceed it.
+                new_max = max(0, _cur_int(self.var_hp_max) + perm_val)
+                self.var_hp_max.set(str(new_max))
+                cur_hp = _cur_int(self.var_hp_current)
+                if perm_val > 0:
+                    cur_hp += perm_val
+                self.var_hp_current.set(str(max(0, min(self._get_effective_hp_max(), cur_hp))))
             elif perm_stat == "mana_max":
-                try:
-                    cur = int(self.var_mana_max.get().strip() or "0")
-                except ValueError:
-                    cur = 0
-                self.var_mana_max.set(str(cur + perm_val))
-            stat_label = dict(BOOST_TARGET_LABELS).get(perm_stat, perm_stat)
-            results.append(f"{stat_label} permanently +{perm_val}")
+                new_max = max(0, _cur_int(self.var_mana_max) + perm_val)
+                self.var_mana_max.set(str(new_max))
+                cur_mana = _cur_int(self.var_mana_current)
+                if perm_val > 0:
+                    cur_mana += perm_val
+                self.var_mana_current.set(str(max(0, min(self._get_effective_mana_max(), cur_mana))))
+            if perm_stat in ("hp_max", "mana_max"):
+                # STAT_KEYS branches already appended their own (pool-aware) note above.
+                stat_label = dict(BOOST_TARGET_LABELS).get(perm_stat, perm_stat)
+                results.append(f"{stat_label} permanently {perm_val:+d}")
 
         # Remove the consumed item from equipment
         try:
@@ -6001,7 +6293,7 @@ class CharacterSheet(ttk.Frame):
             return base
         flat = info.get("flat", 0)
         pct = info.get("percent", 0)
-        return int(base + flat + math.floor(base * pct / 100))
+        return apply_boost_value(base, flat, pct)
 
     def _get_effective_stat(self, key: str) -> int:
         """Return the effective value of a stat after applying equipment boosts."""
@@ -6030,13 +6322,144 @@ class CharacterSheet(ttk.Frame):
         totals = self._compute_equipment_boosts()
         return self._apply_boost(base, totals.get("mana_max"))
 
+    def _boost_style_for(self, effective: int, base: int) -> str:
+        """Pick a label style: red when boosts lower a value, green when they
+        raise it, gray when there is no net change."""
+        if effective < base:
+            return "Red.TLabel"
+        if effective > base:
+            return "Green.TLabel"
+        return "Gray.TLabel"
+
+    # ---------------- Tier point tracking ----------------
+
+    def _add_normal_points_spent(self, n: int):
+        """Advance the cumulative normal-point counter (drives tier progress + tier-up bonus)."""
+        n = _safe_int(n, 0)
+        if n <= 0:
+            return
+        tp = self.char.setdefault("tier_points", {})
+        tp["normal_earned_lifetime"] = _safe_int(tp.get("normal_earned_lifetime"), 0) + n
+        self._refresh_tier_progress()
+
+    def _refresh_tier_progress(self):
+        """Update the tier progress bar + label. Players see only the vague band;
+        DMs also see the exact point figure. Fill is capped so it never reads 'done'."""
+        if not hasattr(self, "tier_progress_bar"):
+            return
+        n = tier_num(self.var_tier.get())
+        spent = _safe_int(self.char.get("tier_points", {}).get("normal_earned_lifetime"), 0)
+        frac, band = tier_progress(spent, n)
+        # Cap the visible fill at 95% so a peak character never looks finished.
+        self.tier_progress_bar["value"] = min(frac * 100.0, 95.0)
+        if self.is_dm:
+            self.var_tier_progress.set(f"{spent:,} / {tier_budget(n):,} pts — {band}")
+        else:
+            self.var_tier_progress.set(band)
+        self._refresh_advance_button(n, spent)
+
+    def _refresh_advance_button(self, n, spent):
+        """Show the Advance Tier button only when at the tier cap and below the
+        highest supported tier."""
+        if not hasattr(self, "btn_advance_tier"):
+            return
+        eligible = spent >= tier_budget(n) and n < MAX_DEFINED_TIER
+        if eligible and not self.btn_advance_tier.winfo_ismapped():
+            self.btn_advance_tier.pack(side=tk.LEFT, padx=(8, 0))
+        elif not eligible and self.btn_advance_tier.winfo_ismapped():
+            self.btn_advance_tier.pack_forget()
+
+    def _apply_slot_maxes_for_tier(self, n):
+        """Set ability slot maxes from the tier formulas (current counts preserved)."""
+        maxes = tier_slot_maxes(n)
+        skills = self.char.setdefault("skills", {})
+        for slot in ("core", "inner", "outer"):
+            s = skills.setdefault(slot, {})
+            s["max"] = maxes[slot]
+            s["current"] = _safe_int(s.get("current"), 0)
+
+    def advance_tier(self):
+        """Advance the character one tier: grant the 50% bonus pool, recompute slot
+        maxes and perm-buff caps. Player-driven, optional, with a confirmation."""
+        n = tier_num(self.var_tier.get())
+        if n >= MAX_DEFINED_TIER:
+            messagebox.showinfo("Advance Tier",
+                                f"T{n} is the highest tier currently supported.")
+            return
+        tp = self.char.setdefault("tier_points", {})
+        lifetime = _safe_int(tp.get("normal_earned_lifetime"), 0)
+        if lifetime < tier_budget(n):
+            messagebox.showinfo("Advance Tier",
+                                f"Not yet at the T{n} cap ({tier_budget(n):,}).")
+            return
+
+        new_n = n + 1
+        bonus = tierup_bonus_points(lifetime)
+        # Plain prompt for everyone (incl. DM): no caps/budgets/slot numbers shown,
+        # so nothing here can be used to min-max.
+        msg = f"Do you wish to tier up to T{new_n}?\n\nThis is permanent — a tier cannot be lowered."
+        if not messagebox.askyesno("Advance Tier", msg):
+            return
+
+        tp["tierup_bonus_pool"] = _safe_int(tp.get("tierup_bonus_pool"), 0) + bonus
+        self._apply_slot_maxes_for_tier(new_n)
+        self.var_tier.set(f"T{new_n}")  # trace refreshes progress + button
+        if self.is_dm:
+            note = (f"Now Tier T{new_n}. +{bonus:,} bonus points added to the pool.\n"
+                    f"Remember to Save.")
+        else:
+            note = (f"Now Tier T{new_n}! Bonus points have been added to your pool "
+                    f"(see Spend Points).\nRemember to Save.")
+        messagebox.showinfo("Advance Tier", note)
+
+    def _maybe_prompt_tier_history(self):
+        """One-time prompt for sheets that predate point tracking: ask the DM/player
+        how many normal points the character has earned-and-spent so far."""
+        tp = self.char.get("tier_points")
+        if not isinstance(tp, dict) or tp.get("initialized"):
+            return
+        # Best-effort estimate: current base stats minus the free 5-per-stat baseline.
+        try:
+            total_stats = sum(_safe_int(self.var_stats[k].get(), 0) for k in STAT_KEYS)
+        except Exception:
+            total_stats = 0
+        baseline = 5 * sum(1 for k in STAT_KEYS if k != "mana_density")
+        estimate = max(0, total_stats - baseline)
+
+        val = simpledialog.askinteger(
+            "Tier Point History",
+            ("This sheet predates stat-point tracking.\n\n"
+             "How many NORMAL stat points has this character earned and spent so far?\n"
+             "(From your records. Excludes the free starting 5-per-stat, gear, buffs,\n"
+             "perm-buff consumables, and tier-up bonus points.)\n\n"
+             f"Rough estimate from current stats: {estimate}"),
+            parent=self.winfo_toplevel(),
+            initialvalue=estimate, minvalue=0,
+        )
+        if val is not None:
+            tp["normal_earned_lifetime"] = _safe_int(val, 0)
+        tp["initialized"] = True
+        self._refresh_tier_progress()
+
     def _refresh_equipment_boosts_display(self):
-        """Update the equipment-bonus labels next to each stat on the Overview tab."""
+        """Update the equipment-bonus labels next to each stat on the Overview tab.
+
+        The label reads e.g. "(+20, -10% boosts → total 110)" where "total"
+        is the value already including the boost. The base entry box is left
+        unchanged; the boost is never written back into it.
+        """
         totals = self._compute_equipment_boosts()
+
+        def _format(parts, base, effective):
+            return f"({', '.join(parts)} boosts → total {effective})"
+
         for key in STAT_KEYS:
             info = totals.get(key)
+            lbl = self.lbl_equip_bonus.get(key)
             if not info:
                 self.var_equip_bonus[key].set("")
+                if lbl is not None:
+                    lbl.configure(style="Gray.TLabel")
                 continue
             parts = []
             flat = info.get("flat", 0)
@@ -6051,16 +6474,23 @@ class CharacterSheet(ttk.Frame):
                 except ValueError:
                     base = 0
                 effective = self._apply_boost(base, info)
-                self.var_equip_bonus[key].set(f"({', '.join(parts)} equip) = {effective}")
+                self.var_equip_bonus[key].set(_format(parts, base, effective))
+                if lbl is not None:
+                    lbl.configure(style=self._boost_style_for(effective, base))
             else:
                 self.var_equip_bonus[key].set("")
+                if lbl is not None:
+                    lbl.configure(style="Gray.TLabel")
 
         # HP / Mana max boost display
         for res_key, var, _ in [("hp_max", self.var_hp_max, "HP"),
                                 ("mana_max", self.var_mana_max, "Mana")]:
             info = totals.get(res_key)
+            lbl = self.lbl_equip_bonus_res.get(res_key)
             if not info:
                 self.var_equip_bonus_res[res_key].set("")
+                if lbl is not None:
+                    lbl.configure(style="Gray.TLabel")
                 continue
             parts = []
             flat = info.get("flat", 0)
@@ -6075,9 +6505,13 @@ class CharacterSheet(ttk.Frame):
                 except ValueError:
                     base = 0
                 effective = self._apply_boost(base, info)
-                self.var_equip_bonus_res[res_key].set(f"({', '.join(parts)} equip) = {effective}")
+                self.var_equip_bonus_res[res_key].set(_format(parts, base, effective))
+                if lbl is not None:
+                    lbl.configure(style=self._boost_style_for(effective, base))
             else:
                 self.var_equip_bonus_res[res_key].set("")
+                if lbl is not None:
+                    lbl.configure(style="Gray.TLabel")
 
         self._refresh_carry_display()
 
@@ -6120,15 +6554,52 @@ class CharacterSheet(ttk.Frame):
         top = ttk.Frame(win)
         top.pack(fill=tk.X, padx=10, pady=10)
 
+        # Spend source: normal earned points (budget-capped) or the tier-up bonus pool.
+        spend_source = tk.StringVar(value="normal")
+        src_frame = ttk.Frame(top)
+        src_frame.pack(anchor="w", pady=(0, 4))
+        ttk.Label(src_frame, text="Spend from:").pack(side=tk.LEFT, padx=(0, 6))
+
         lbl_unspent = ttk.Label(top, text="")
         lbl_unspent.pack(anchor="w")
 
-        def refresh_unspent_label():
+        def bonus_pool():
+            return _safe_int(self.char.get("tier_points", {}).get("tierup_bonus_pool"), 0)
+
+        def normal_unspent():
             try:
-                u = int(self.var_unspent.get().strip() or "0")
+                return int(self.var_unspent.get().strip() or "0")
             except ValueError:
-                u = 0
-            lbl_unspent.config(text=f"Unspent points: {u}")
+                return 0
+
+        def tier_remaining():
+            n = tier_num(self.var_tier.get())
+            lifetime = _safe_int(self.char.get("tier_points", {}).get("normal_earned_lifetime"), 0)
+            return n, lifetime, max(0, tier_budget(n) - lifetime)
+
+        def available_points():
+            return bonus_pool() if spend_source.get() == "bonus" else normal_unspent()
+
+        def refresh_unspent_label():
+            n, lifetime, remaining = tier_remaining()
+            if spend_source.get() == "bonus":
+                lbl_unspent.config(
+                    text=f"Tier-up bonus pool: {bonus_pool()}    |    "
+                         f"(bonus points are not limited by the tier budget)"
+                )
+            elif self.is_dm:
+                # DM sees the exact budget; players don't (prevents min-maxing).
+                lbl_unspent.config(
+                    text=f"Unspent points: {normal_unspent()}    |    Tier T{n} budget: "
+                         f"{lifetime} / {tier_budget(n)} ({remaining} left to spend)"
+                )
+            else:
+                lbl_unspent.config(text=f"Unspent points: {normal_unspent()}")
+
+        ttk.Radiobutton(src_frame, text="Normal points", variable=spend_source,
+                        value="normal", command=refresh_unspent_label).pack(side=tk.LEFT)
+        ttk.Radiobutton(src_frame, text="Tier-up bonus pool", variable=spend_source,
+                        value="bonus", command=refresh_unspent_label).pack(side=tk.LEFT, padx=(8, 0))
 
         refresh_unspent_label()
 
@@ -6184,11 +6655,7 @@ class CharacterSheet(ttk.Frame):
             amount_entry_var.set(str(max(0, int(v))))
 
         def set_pct(pct: float):
-            try:
-                u = int(self.var_unspent.get().strip() or "0")
-            except ValueError:
-                u = 0
-            set_amt(int(math.floor(u * pct)))
+            set_amt(int(math.floor(available_points() * pct)))
 
         ttk.Button(row2, text="1", command=lambda: set_amt(1)).pack(side=tk.LEFT)
         ttk.Button(row2, text="5", command=lambda: set_amt(5)).pack(side=tk.LEFT, padx=4)
@@ -6228,15 +6695,36 @@ class CharacterSheet(ttk.Frame):
                 result_var.set("Amount must be > 0.")
                 return
 
-            try:
-                unspent = int(self.var_unspent.get().strip() or "0")
-            except ValueError:
-                unspent = 0
-            if unspent <= 0:
-                result_var.set("You have 0 unspent points.")
+            from_bonus = spend_source.get() == "bonus"
+            available = available_points()
+            if available <= 0:
+                result_var.set("Tier-up bonus pool is empty." if from_bonus
+                               else "You have 0 unspent points.")
                 return
 
-            budget = min(budget, unspent)
+            budget = min(budget, available)
+            cap_note = ""
+
+            if not from_bonus:
+                # Normal points are capped by the tier budget (bonus points are not).
+                n, lifetime, remaining = tier_remaining()
+                if remaining <= 0:
+                    if self.is_dm and messagebox.askyesno(
+                        "Tier Point Cap",
+                        f"This character is at the T{n} point cap "
+                        f"({tier_budget(n)}). Override and spend beyond the tier budget?"
+                    ):
+                        pass  # DM override: allow over-budget spend
+                    else:
+                        if not self.is_dm:
+                            result_var.set(
+                                "You're at your tier point cap. Advance a tier to spend more."
+                            )
+                        return
+                elif budget > remaining:
+                    budget = remaining
+                    cap_note = (f" (capped to {remaining}: Tier T{n} budget limit)"
+                                if self.is_dm else " (reached your tier point cap)")
 
             spent, gained_text = self._spend_points_to_target(tid, budget)
 
@@ -6244,10 +6732,20 @@ class CharacterSheet(ttk.Frame):
                 result_var.set("No points spent (possibly not enough to meet costs).")
                 return
 
-            self.var_unspent.set(str(unspent - spent))
+            if from_bonus:
+                # Spend from the bonus pool; does NOT advance the normal-point counter.
+                tp = self.char.setdefault("tier_points", {})
+                tp["tierup_bonus_pool"] = max(0, bonus_pool() - spent)
+                source_note = " from bonus pool"
+            else:
+                self.var_unspent.set(str(normal_unspent() - spent))
+                # Normal points advance the lifetime counter (tier progress + tier-up bonus).
+                self._add_normal_points_spent(spent)
+                source_note = ""
+
             self._refresh_mana_density_display()
             refresh_unspent_label()
-            result_var.set(f"Spent {spent}. {gained_text}")
+            result_var.set(f"Spent {spent}{source_note}. {gained_text}{cap_note}")
 
         ttk.Button(bottom, text="Spend", command=apply_spend).pack(side=tk.LEFT)
         ttk.Button(bottom, text="Close", command=win.destroy).pack(side=tk.RIGHT)
@@ -6315,6 +6813,7 @@ class CharacterSheet(ttk.Frame):
     def refresh_from_model(self):
         c = self.char
         _migrate_stats_schema(c)
+        _migrate_tier_schema(c)
 
         self.var_name.set(c.get("name", ""))
         self.var_tier.set(c.get("tier", ""))
@@ -6418,6 +6917,11 @@ class CharacterSheet(ttk.Frame):
         self.var_hit_result.set("")
         self._refresh_equipment_boosts_display()
         self._refresh_body_map()
+        self._refresh_tier_progress()
+
+        # Old saves with no tracked point history: prompt once after the UI settles.
+        if not self.char.get("tier_points", {}).get("initialized", True):
+            self.after(400, self._maybe_prompt_tier_history)
 
     def apply_to_model(self):
         c = self.char
