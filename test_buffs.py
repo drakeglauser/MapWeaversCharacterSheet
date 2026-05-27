@@ -55,6 +55,35 @@ class TestApplyBoostValue(unittest.TestCase):
         # base 100, +20 flat, -50% -> 100 + 20 - 50 = 70
         self.assertEqual(st.apply_boost_value(100, 20, -50), 70)
 
+    def test_mult_applied_last(self):
+        # (base + flat + base*pct/100) * mult
+        self.assertEqual(st.apply_boost_value(100, 0, 0, 2.0), 200)     # x2
+        self.assertEqual(st.apply_boost_value(100, 0, 0, 0.5), 50)      # x0.5
+        # additive then multiplicative: (100 + 20 + 100*10%) * 2 = 130*2 = 260
+        self.assertEqual(st.apply_boost_value(100, 20, 10, 2.0), 260)
+        # two mults multiply: x2 * x0.5 = x1 (passed pre-multiplied as 1.0)
+        self.assertEqual(st.apply_boost_value(100, 0, 0, 1.0), 100)
+
+    def test_format_boost(self):
+        self.assertEqual(st.format_boost(5, "flat"), "+5")
+        self.assertEqual(st.format_boost(-5, "flat"), "-5")
+        self.assertEqual(st.format_boost(10, "percent"), "+10%")
+        self.assertEqual(st.format_boost(2, "mult"), "x2")
+        self.assertEqual(st.format_boost(0.5, "mult"), "x0.5")
+
+    def test_normalize_keeps_mult_drops_noops(self):
+        raw = [
+            {"stat": "strength", "value": 2, "mode": "mult"},   # keep
+            {"stat": "strength", "value": 1, "mode": "mult"},   # x1 no-op -> drop
+            {"stat": "melee_acc", "value": 0, "mode": "flat"},  # 0 no-op -> drop
+            {"stat": "melee_acc", "value": 5, "mode": "flat"},  # keep
+        ]
+        out = st._normalize_stat_boosts(raw)
+        self.assertEqual(len(out), 2)
+        modes = {(b["stat"], b["mode"], b["value"]) for b in out}
+        self.assertIn(("strength", "mult", 2.0), modes)
+        self.assertIn(("melee_acc", "flat", 5.0), modes)
+
     def test_round_half_away_symmetry(self):
         self.assertEqual(st._round_half_away(2.5), 3)
         self.assertEqual(st._round_half_away(-2.5), -3)
@@ -207,6 +236,62 @@ class TestTierMigration(unittest.TestCase):
         st._migrate_tier_schema(char)
         self.assertEqual(char["tier_points"], first)
         self.assertEqual(char["skills"]["outer"]["max"], 11)
+
+
+class TestStatusEffects(unittest.TestCase):
+    def _raw(self, **kw):
+        base = {"name": "Test", "effect_type": "debuff", "duration": 3, "tier": "T1",
+                "stat_modifiers": [], "dot_damage": 0, "dot_healing": 0,
+                "stacks": 1, "max_stacks": 3}
+        base.update(kw)
+        return base
+
+    def test_same_tier_no_scaling(self):
+        raw = self._raw(stat_modifiers=[{"stat": "agility", "value": -15, "mode": "flat"}], tier="T1")
+        eff = st.build_applied_status_effect(raw, "T1")
+        self.assertEqual(eff["stat_modifiers"][0]["value"], -15)
+
+    def test_higher_source_scales_up(self):
+        raw = self._raw(stat_modifiers=[{"stat": "agility", "value": -15, "mode": "flat"}],
+                        tier="T2", dot_damage=6)
+        eff = st.build_applied_status_effect(raw, "T1")  # gap +1 -> x2
+        self.assertEqual(eff["stat_modifiers"][0]["value"], -30)
+        self.assertEqual(eff["dot_damage"], 12)
+
+    def test_lower_source_scales_down(self):
+        raw = self._raw(stat_modifiers=[{"stat": "agility", "value": -15, "mode": "flat"}], tier="T1")
+        eff = st.build_applied_status_effect(raw, "T3")  # gap -2 -> x0.25
+        self.assertEqual(eff["stat_modifiers"][0]["value"], -4)  # -3.75 -> -4 away from zero
+
+    def test_fizzle_when_nothing(self):
+        raw = self._raw(stat_modifiers=[{"stat": "agility", "value": -1, "mode": "flat"}], tier="T1")
+        self.assertIsNone(st.build_applied_status_effect(raw, "T5"))  # -1 * 0.0625 -> 0 -> fizzle
+
+    def test_mult_modifier_not_tier_scaled(self):
+        raw = self._raw(stat_modifiers=[{"stat": "pbd", "value": 1.5, "mode": "mult"}], tier="T2")
+        eff = st.build_applied_status_effect(raw, "T1")  # x2 tier gap shouldn't touch mult
+        self.assertEqual(eff["stat_modifiers"][0], {"stat": "pbd", "value": 1.5, "mode": "mult"})
+
+    def test_add_and_stack(self):
+        char = {"tier": "T1", "status_effects": []}
+        raw = self._raw(name="Burning", dot_damage=6, max_stacks=3, tier="T1")
+        st.add_status_effect_to_char(char, raw, "T1")
+        st.add_status_effect_to_char(char, raw, "T1")
+        self.assertEqual(len(char["status_effects"]), 1)
+        self.assertEqual(char["status_effects"][0]["stacks"], 2)
+
+    def test_stack_capped(self):
+        char = {"tier": "T1", "status_effects": []}
+        raw = self._raw(name="Burning", dot_damage=6, max_stacks=2, tier="T1")
+        for _ in range(5):
+            st.add_status_effect_to_char(char, raw, "T1")
+        self.assertEqual(char["status_effects"][0]["stacks"], 2)
+
+    def test_library_loads(self):
+        # Every library entry normalizes and applies at same tier without error.
+        for raw in st.STATUS_EFFECT_LIBRARY:
+            eff = st.build_applied_status_effect(dict(raw, tier="T1"), "T1")
+            self.assertIsNotNone(eff, f"{raw['name']} should apply at same tier")
 
 
 if __name__ == "__main__":

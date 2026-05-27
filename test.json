@@ -1,5 +1,5 @@
 {
-  "name": "New Hero",
+  "name": "Drake",
   "tier": "T1",
   "resources": {
     "hp": {
@@ -7,21 +7,24 @@
       "max": 20
     },
     "mana": {
-      "current": 10,
-      "max": 10
+      "current": 100,
+      "max": 100
     },
-    "pbd": 0,
     "unspent_points": 0
   },
   "stats": {
-    "str": 10,
-    "dex": 10,
-    "con": 10,
-    "int": 10,
-    "wis": 10,
-    "cha": 10,
-    "san": 10,
-    "hnr": 10
+    "melee_acc": 100,
+    "ranged_acc": 100,
+    "spellcraft": 100,
+    "pbd": 100,
+    "mana_density": 100,
+    "precision": 100,
+    "phys_def": 100,
+    "evasion": 100,
+    "wis_def": 100,
+    "utility": 100,
+    "agility": 10,
+    "strength": 100
   },
   "skills": {
     "core": {
@@ -42,7 +45,31 @@
     "bound_max": 0
   },
   "inventory": {
-    "equipment": [],
+    "equipment": [
+      {
+        "name": "50 cal",
+        "favorite": false,
+        "roll_type": "Attack",
+        "damage": "2d20+15",
+        "notes": "This 50 cal has been upgraded to pack more of punch, and is more accepting of ammo that is not strictly manufactured for the 50 cal",
+        "apply_bonus": true,
+        "apply_pbd": true,
+        "is_ranged": true,
+        "stat_boosts": [
+          {
+            "stat": "ranged_acc",
+            "value": 10.0,
+            "mode": "flat"
+          },
+          {
+            "stat": "precision",
+            "value": 5.0,
+            "mode": "flat"
+          }
+        ],
+        "weight": 10.0
+      }
+    ],
     "bag": [],
     "storage": []
   },
@@ -68,5 +95,6 @@
   },
   "notes": "",
   "world_info": "",
-  "talents": {}
+  "talents": {},
+  "mana_stones": {}
 }

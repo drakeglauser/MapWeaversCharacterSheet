@@ -824,6 +824,122 @@ def apply_perm_buff_gain(pool: int, n: int, points: int) -> tuple:
     return _round_half_away(gain), p, applied
 
 
+# ---------------- Status effects (see Context/tier_rules.md S5, prompt.md S3) ----------------
+
+STATUS_EFFECT_TYPES = ("buff", "debuff", "neutral")
+
+
+def ensure_status_effect_obj(x):
+    """Normalize a status effect dict (backward-compatible defaults)."""
+    if not isinstance(x, dict):
+        return None
+    etype = x.get("effect_type", "debuff")
+    if etype not in STATUS_EFFECT_TYPES:
+        etype = "neutral"
+    return {
+        "name": x.get("name", ""),
+        "effect_type": etype,
+        "duration": _safe_int(x.get("duration", -1), -1),   # -1 = permanent until removed
+        "tier": x.get("tier", "T1"),                          # tier of the source that applied it
+        "stat_modifiers": _normalize_stat_boosts(x.get("stat_modifiers")),
+        "dot_damage": _safe_int(x.get("dot_damage"), 0),      # HP lost per turn
+        "dot_healing": _safe_int(x.get("dot_healing"), 0),    # HP healed per turn
+        "stacks": max(1, _safe_int(x.get("stacks"), 1)),
+        "max_stacks": max(1, _safe_int(x.get("max_stacks"), 1)),
+        "source": x.get("source", ""),
+    }
+
+
+def build_applied_status_effect(raw, target_tier):
+    """Take an authored effect + the target's tier and return a ready-to-store effect
+    with cross-tier scaling (2^gap) frozen into its flat/percent modifiers and DoT/HoT.
+    `mult` modifiers are kept as-is (not tier-scaled). Returns None if the effect would
+    do nothing after scaling (the 'fizzle' rule from tier_rules S5)."""
+    eff = ensure_status_effect_obj(raw)
+    if eff is None:
+        return None
+    mult = cross_tier_mult(eff["tier"], target_tier)
+
+    out_mods = []
+    for m in eff["stat_modifiers"]:
+        if m["mode"] == "mult":
+            out_mods.append({"stat": m["stat"], "value": m["value"], "mode": "mult"})
+        else:
+            v = _round_half_away(m["value"] * mult)
+            if v != 0:
+                out_mods.append({"stat": m["stat"], "value": v, "mode": m["mode"]})
+
+    dot_d = _round_half_away(eff["dot_damage"] * mult) if eff["dot_damage"] else 0
+    dot_h = _round_half_away(eff["dot_healing"] * mult) if eff["dot_healing"] else 0
+
+    if not out_mods and dot_d == 0 and dot_h == 0:
+        return None  # fizzled: too weak to do anything across the tier gap
+
+    eff["stat_modifiers"] = out_mods
+    eff["dot_damage"] = dot_d
+    eff["dot_healing"] = dot_h
+    return eff
+
+
+def add_status_effect_to_char(char, raw, target_tier):
+    """Apply a status effect to a character. Stacks with an existing same-named effect
+    (up to max_stacks) and refreshes its duration. Returns the stored effect, or None
+    if it fizzled."""
+    eff = build_applied_status_effect(raw, target_tier)
+    if eff is None:
+        return None
+    lst = char.setdefault("status_effects", [])
+    for existing in lst:
+        if existing.get("name", "").lower() == eff["name"].lower():
+            existing["stacks"] = min(existing.get("max_stacks", 1),
+                                     existing.get("stacks", 1) + 1)
+            existing["duration"] = eff["duration"]  # refresh
+            return existing
+    lst.append(eff)
+    return eff
+
+
+# Predefined library. Values are baseline (as if same-tier); cross-tier scaling is
+# applied when the effect is added to a character.
+STATUS_EFFECT_LIBRARY = [
+    # --- Debuffs ---
+    {"name": "Burning", "effect_type": "debuff", "duration": 3, "dot_damage": 6, "max_stacks": 5},
+    {"name": "Poisoned", "effect_type": "debuff", "duration": 5, "dot_damage": 3, "max_stacks": 10},
+    {"name": "Frozen", "effect_type": "debuff", "duration": 2, "max_stacks": 1,
+     "stat_modifiers": [{"stat": "agility", "value": -15, "mode": "flat"},
+                        {"stat": "evasion", "value": -10, "mode": "flat"}]},
+    {"name": "Stunned", "effect_type": "debuff", "duration": 1, "max_stacks": 1,
+     "stat_modifiers": [{"stat": "evasion", "value": -50, "mode": "percent"},
+                        {"stat": "agility", "value": -50, "mode": "percent"}]},
+    {"name": "Blinded", "effect_type": "debuff", "duration": 2, "max_stacks": 1,
+     "stat_modifiers": [{"stat": "melee_acc", "value": -40, "mode": "percent"},
+                        {"stat": "ranged_acc", "value": -40, "mode": "percent"},
+                        {"stat": "spellcraft", "value": -40, "mode": "percent"}]},
+    {"name": "Cursed", "effect_type": "debuff", "duration": 4, "max_stacks": 1,
+     "stat_modifiers": [{"stat": "wis_def", "value": -10, "mode": "flat"},
+                        {"stat": "phys_def", "value": -10, "mode": "flat"}]},
+    {"name": "Weakened", "effect_type": "debuff", "duration": 3, "max_stacks": 3,
+     "stat_modifiers": [{"stat": "strength", "value": -8, "mode": "flat"},
+                        {"stat": "pbd", "value": -8, "mode": "flat"}]},
+    # --- Buffs ---
+    {"name": "Blessed", "effect_type": "buff", "duration": 3, "max_stacks": 1,
+     "stat_modifiers": [{"stat": "melee_acc", "value": 8, "mode": "flat"},
+                        {"stat": "spellcraft", "value": 8, "mode": "flat"},
+                        {"stat": "wis_def", "value": 8, "mode": "flat"}]},
+    {"name": "Haste", "effect_type": "buff", "duration": 3, "max_stacks": 1,
+     "stat_modifiers": [{"stat": "agility", "value": 15, "mode": "flat"}]},
+    {"name": "Shield", "effect_type": "buff", "duration": 3, "max_stacks": 1,
+     "stat_modifiers": [{"stat": "phys_def", "value": 12, "mode": "flat"}]},
+    {"name": "Regeneration", "effect_type": "buff", "duration": 5, "dot_healing": 5, "max_stacks": 3},
+    {"name": "Empowered", "effect_type": "buff", "duration": 2, "max_stacks": 1,
+     "stat_modifiers": [{"stat": "pbd", "value": 1.5, "mode": "mult"},
+                        {"stat": "spellcraft", "value": 1.25, "mode": "mult"}]},
+    {"name": "Fortified", "effect_type": "buff", "duration": 3, "max_stacks": 1,
+     "stat_modifiers": [{"stat": "phys_def", "value": 10, "mode": "flat"},
+                        {"stat": "wis_def", "value": 10, "mode": "flat"}]},
+]
+
+
 # ---------------- Data schema helpers ----------------
 
 def default_character_template(name="New Hero"):
@@ -847,6 +963,7 @@ def default_character_template(name="New Hero"):
             "perm_buff_pool": 0,           # running total of stat gained from perm-buff consumables
             "initialized": True,           # new chars start tracked at 0; old saves prompt for their history
         },
+        "status_effects": [],
         "growth_items": {"bound_current": 0, "bound_max": 4},
         "inventory": {"equipment": [], "bag": [], "storage": []},
         "abilities": {"core": [], "inner": [], "outer": []},
@@ -948,6 +1065,12 @@ def _migrate_tier_schema(char: dict):
         skills[slot] = s
     char["skills"] = skills
 
+    # Status effects: normalize / backfill the list.
+    raw_fx = char.get("status_effects")
+    if not isinstance(raw_fx, list):
+        raw_fx = []
+    char["status_effects"] = [e for e in (ensure_status_effect_obj(x) for x in raw_fx) if e]
+
 
 def sort_favorites_first(items):
     return sorted(items, key=lambda it: (not bool(it.get("favorite", False)), it.get("name", "").lower()))
@@ -973,9 +1096,10 @@ def _normalize_stat_boosts(raw) -> list:
         except (ValueError, TypeError):
             value = 0
         mode = b.get("mode", "flat")
-        if mode not in ("flat", "percent"):
+        if mode not in ("flat", "percent", "mult"):
             mode = "flat"
-        if value != 0:
+        # flat/percent of 0 are no-ops; a mult is a no-op only at exactly 1.0.
+        if (mode == "mult" and value != 1.0) or (mode != "mult" and value != 0):
             boosts.append({"stat": stat, "value": value, "mode": mode})
     return boosts
 
@@ -993,15 +1117,33 @@ def _round_half_away(x: float) -> int:
     return int(math.floor(x + 0.5)) if x >= 0 else int(math.ceil(x - 0.5))
 
 
-def apply_boost_value(base: float, flat: float, pct: float) -> int:
-    """Apply a flat boost and a percent boost to a base value.
+def apply_boost_value(base: float, flat: float, pct: float, mult: float = 1.0) -> int:
+    """Apply flat, additive-percent, and multiplicative boosts to a base value.
+
+    Order of operations:
+        effective = round( (base + flat + base*pct/100) * mult )
 
     - Percent is taken against the base only (not base+flat). Multiple percent
       boosts are summed additively before being passed in as `pct`.
+    - `mult` is the product of all multiplicative boosts (default 1.0 = none) and
+      is applied LAST, after the additive part (e.g. a "x2 strength" buff).
     - Only the FINAL output is rounded (ties away from zero), so fractional
-      flat or percent contributions don't get truncated away.
+      contributions don't get truncated away.
     """
-    return _round_half_away(base + flat + base * pct / 100.0)
+    return _round_half_away((base + flat + base * pct / 100.0) * mult)
+
+
+def format_boost(value, mode: str) -> str:
+    """Human-readable form of a single stat boost: +5, +10%, or x2."""
+    try:
+        v = float(value)
+    except (ValueError, TypeError):
+        v = 0.0
+    if mode == "mult":
+        return f"x{v:g}"
+    if mode == "percent":
+        return f"{v:+g}%"
+    return f"{v:+g}"
 
 
 def ensure_item_obj(x):
@@ -2151,6 +2293,7 @@ class CharacterSheet(ttk.Frame):
         self.var_name = tk.StringVar()
         self.var_tier = tk.StringVar()
         self.var_tier_progress = tk.StringVar(value="")  # band label (+ DM number)
+        self.var_status_fx_result = tk.StringVar(value="")  # status effects feedback line
 
         self.var_hp_current = tk.StringVar()
         self.var_hp_max = tk.StringVar()
@@ -2270,7 +2413,6 @@ class CharacterSheet(ttk.Frame):
         self.var_combat_result = tk.StringVar(value="")
 
         # Active consumable buffs (runtime only, not saved)
-        self.active_buffs = []  # [{name, stat_boosts, turns_remaining}]
 
         # Track raw tk widgets that need manual theme styling
         self._tk_widgets = []  # list of tk.Text / tk.Listbox / tk.Canvas
@@ -2510,6 +2652,22 @@ class CharacterSheet(ttk.Frame):
             row=10, column=0, columnspan=4, sticky="ew", padx=4, pady=(6, 4)
         )
 
+        # Status Effects panel
+        fx_frame = ttk.LabelFrame(left, text="Status Effects")
+        fx_frame.pack(fill=tk.X, pady=6)
+
+        self.status_fx_list = tk.Listbox(fx_frame, height=5, exportselection=False)
+        self.status_fx_list.pack(fill=tk.X, padx=6, pady=(6, 2))
+        self._tk_widgets.append(self.status_fx_list)
+
+        fx_btns = ttk.Frame(fx_frame)
+        fx_btns.pack(fill=tk.X, padx=6, pady=(2, 4))
+        ttk.Button(fx_btns, text="Add…", command=self.status_add_dialog).pack(side=tk.LEFT)
+        ttk.Button(fx_btns, text="Remove", command=self.status_remove_selected).pack(side=tk.LEFT, padx=4)
+        ttk.Button(fx_btns, text="Next Turn ⏭", command=self.status_next_turn).pack(side=tk.RIGHT)
+        ttk.Label(fx_frame, textvariable=self.var_status_fx_result, style="Gray.TLabel",
+                  wraplength=260, justify="left").pack(anchor="w", padx=6, pady=(0, 6))
+
         # Combat quick use
         combat = ttk.LabelFrame(right, text="Combat Quick Use (select equipment / ability)")
         combat.pack(fill=tk.BOTH, expand=True, pady=6)
@@ -2559,18 +2717,7 @@ class CharacterSheet(ttk.Frame):
         ttk.Label(c_right, textvariable=self.var_combat_result, foreground="gray").grid(
             row=7, column=0, columnspan=2, sticky="w", padx=4, pady=(2, 2)
         )
-
-        # Active Buffs panel (shown only when consumable buffs with turns are active)
-        buff_frame = ttk.LabelFrame(c_right, text="Active Buffs")
-        buff_frame.grid(row=8, column=0, columnspan=2, sticky="ew", padx=4, pady=(6, 2))
-        self._buff_frame = buff_frame
-
-        self.active_buffs_list = tk.Listbox(buff_frame, height=4, exportselection=False)
-        self.active_buffs_list.pack(fill=tk.X, padx=6, pady=(4, 2))
-        self._tk_widgets.append(self.active_buffs_list)
-
-        ttk.Button(buff_frame, text="Remove Buff", command=self._remove_active_buff).pack(
-            anchor="w", padx=6, pady=(2, 6))
+        # (Buffs/debuffs now live in the Status Effects panel on the left.)
 
         for col in range(2):
             c_right.grid_columnconfigure(col, weight=1)
@@ -3224,9 +3371,11 @@ class CharacterSheet(ttk.Frame):
                 for b in boosts:
                     stat_name = stat_label_map.get(b["stat"], b["stat"])
                     val = b.get("value", 0)
-                    suffix = "%" if b["mode"] == "percent" else ""
-                    tag = "neg" if val < 0 else ("pos" if val > 0 else None)
-                    segments.append((f"  {stat_name}: {val:+g}{suffix}", tag))
+                    mode = b.get("mode", "flat")
+                    # For mult, the neutral point is 1.0 (x0.5 lowers, x2 raises).
+                    pivot = 1.0 if mode == "mult" else 0
+                    tag = "neg" if val < pivot else ("pos" if val > pivot else None)
+                    segments.append((f"  {stat_name}: {format_boost(val, mode)}", tag))
             w = float(equipped_item.get("weight", 0) or 0)
             if w:
                 segments.append((f"\nWeight: {w} lbs", None))
@@ -3386,7 +3535,7 @@ class CharacterSheet(ttk.Frame):
 
         ttk.Entry(boost_controls, textvariable=self.inv_boost_value[key], width=6).pack(side=tk.LEFT, padx=(0, 4))
 
-        ttk.Combobox(boost_controls, values=["flat", "percent"], textvariable=self.inv_boost_mode[key],
+        ttk.Combobox(boost_controls, values=["flat", "percent", "mult"], textvariable=self.inv_boost_mode[key],
                       state="readonly", width=8).pack(side=tk.LEFT, padx=(0, 4))
 
         ttk.Button(boost_controls, text="+", width=3,
@@ -3657,11 +3806,7 @@ class CharacterSheet(ttk.Frame):
         stat_label_map = {k: lbl for k, lbl in BOOST_TARGET_LABELS}
         for b in self.inv_boost_data[key]:
             stat_name = stat_label_map.get(b["stat"], b["stat"])
-            if b["mode"] == "percent":
-                display = f"{stat_name}: {b['value']:+g}%"
-            else:
-                display = f"{stat_name}: {b['value']:+g}"
-            lb.insert(tk.END, display)
+            lb.insert(tk.END, f"{stat_name}: {format_boost(b['value'], b['mode'])}")
 
     def inv_boost_add(self, key: str):
         """Add a stat boost to the currently selected item."""
@@ -3681,9 +3826,10 @@ class CharacterSheet(ttk.Frame):
             value = float(self.inv_boost_value[key].get().strip() or "0")
         except ValueError:
             return
-        if value == 0:
-            return
         mode = self.inv_boost_mode[key].get() or "flat"
+        # flat/percent of 0 are no-ops; for mult the no-op is x1.
+        if (mode == "mult" and value == 1.0) or (mode != "mult" and value == 0):
+            return
         self.inv_boost_data[key].append({"stat": stat_key, "value": value, "mode": mode})
         # Live-save to item dict
         self.inv_selected_ref[key]["stat_boosts"] = list(self.inv_boost_data[key])
@@ -3917,7 +4063,7 @@ class CharacterSheet(ttk.Frame):
 
         ttk.Entry(ab_boost_controls, textvariable=self.ability_boost_value[key], width=6).pack(side=tk.LEFT, padx=(0, 4))
 
-        ttk.Combobox(ab_boost_controls, values=["flat", "percent"], textvariable=self.ability_boost_mode[key],
+        ttk.Combobox(ab_boost_controls, values=["flat", "percent", "mult"], textvariable=self.ability_boost_mode[key],
                       state="readonly", width=8).pack(side=tk.LEFT, padx=(0, 4))
 
         ttk.Button(ab_boost_controls, text="+", width=3,
@@ -4102,11 +4248,7 @@ class CharacterSheet(ttk.Frame):
         stat_label_map = {k: lbl for k, lbl in BOOST_TARGET_LABELS}
         for b in self.ability_boost_data[key]:
             stat_name = stat_label_map.get(b["stat"], b["stat"])
-            if b["mode"] == "percent":
-                display = f"{stat_name}: {b['value']:+g}%"
-            else:
-                display = f"{stat_name}: {b['value']:+g}"
-            lb.insert(tk.END, display)
+            lb.insert(tk.END, f"{stat_name}: {format_boost(b['value'], b['mode'])}")
 
     def ability_boost_add(self, key: str):
         """Add a stat boost to the currently selected ability."""
@@ -4125,9 +4267,9 @@ class CharacterSheet(ttk.Frame):
             value = float(self.ability_boost_value[key].get().strip() or "0")
         except ValueError:
             return
-        if value == 0:
-            return
         mode = self.ability_boost_mode[key].get() or "flat"
+        if (mode == "mult" and value == 1.0) or (mode != "mult" and value == 0):
+            return
         self.ability_boost_data[key].append({"stat": stat_key, "value": value, "mode": mode})
         self.ability_selected_ref[key]["stat_boosts"] = list(self.ability_boost_data[key])
         self.ability_boost_render(key)
@@ -5303,10 +5445,7 @@ class CharacterSheet(ttk.Frame):
         boost_strs = []
         for b in item.get("stat_boosts", []):
             sn = stat_label_map.get(b.get("stat", ""), b.get("stat", ""))
-            if b.get("mode") == "percent":
-                boost_strs.append(f"{sn} {b.get('value', 0):+g}%")
-            else:
-                boost_strs.append(f"{sn} {b.get('value', 0):+g}")
+            boost_strs.append(f"{sn} {format_boost(b.get('value', 0), b.get('mode', 'flat'))}")
         self.lib_item_boosts.set(", ".join(boost_strs) if boost_strs else "None")
 
         self.lib_item_source.set(metadata.get("source_character", "Unknown"))
@@ -5803,15 +5942,25 @@ class CharacterSheet(ttk.Frame):
                     messagebox.showwarning("Combat", f"Not enough mana. You have {cur_mana_e}, need {spent_eff_e} (slot-adjusted).")
                     return
                 self.var_mana_current.set(str(cur_mana_e - spent_eff_e))
-                self.active_buffs.append({
+                # Self-buff: apply as a Status Effect (same tier as the caster, so no
+                # cross-tier scaling) so it shows in the panel and ticks on Next Turn.
+                self_tier = self.var_tier.get() or "T1"
+                raw = {
                     "name": ref.get("name", "spell"),
-                    "stat_boosts": list(ab_boosts_early),
-                    "turns_remaining": ab_bt_early,
-                })
-                self._render_active_buffs()
+                    "effect_type": "buff",
+                    "duration": ab_bt_early,
+                    "tier": self_tier,
+                    "stat_modifiers": list(ab_boosts_early),
+                    "dot_damage": 0, "dot_healing": 0,
+                    "stacks": 1, "max_stacks": 1,
+                    "source": ref.get("name", "spell"),
+                }
+                add_status_effect_to_char(self.char, raw, self_tier)
+                self._render_status_effects()
                 self._refresh_equipment_boosts_display()
                 self.var_combat_result.set(
-                    f"Cast {ref.get('name','spell')}: buff applied for {ab_bt_early} turns. Mana spent: {spent_eff_e}."
+                    f"Cast {ref.get('name','spell')}: buff applied for {ab_bt_early} turns "
+                    f"(see Status Effects). Mana spent: {spent_eff_e}."
                 )
                 return
 
@@ -5913,15 +6062,18 @@ class CharacterSheet(ttk.Frame):
 
         self.var_mana_current.set(str(cur_mana - spent_eff))
 
-        # Case B/D: Apply temporary buff if ability has one
+        # Case B/D: Apply temporary buff if ability has one (as a self Status Effect)
         buff_note = ""
         if ab_boosts and ab_buff_turns > 0:
-            self.active_buffs.append({
-                "name": ref.get("name", "spell"),
-                "stat_boosts": list(ab_boosts),
-                "turns_remaining": ab_buff_turns,
-            })
-            self._render_active_buffs()
+            self_tier = self.var_tier.get() or "T1"
+            add_status_effect_to_char(self.char, {
+                "name": ref.get("name", "spell"), "effect_type": "buff",
+                "duration": ab_buff_turns, "tier": self_tier,
+                "stat_modifiers": list(ab_boosts),
+                "dot_damage": 0, "dot_healing": 0, "stacks": 1, "max_stacks": 1,
+                "source": ref.get("name", "spell"),
+            }, self_tier)
+            self._render_status_effects()
             self._refresh_equipment_boosts_display()
             buff_note = f" | Buff applied ({ab_buff_turns} turns)"
 
@@ -5937,7 +6089,7 @@ class CharacterSheet(ttk.Frame):
             result += f" → {raw_total}. Mana spent: {spent_eff}.{buff_note}"
         self.var_combat_result.set(result)
 
-    # ---------------- Consumables / Active Buffs ----------------
+    # ---------------- Consumables ----------------
 
     def consume_combat_item(self):
         """Consume the selected equipment item from the combat quick-use list."""
@@ -6015,17 +6167,19 @@ class CharacterSheet(ttk.Frame):
             self.var_mana_current.set(str(new_mana))
             results.append(f"Mana +{new_mana - cur}")
 
-        # Temporary buff (stat_boosts with turns)
+        # Temporary buff (stat_boosts with turns) -> applied as a self Status Effect
         turns = _safe_int(ref.get("consume_turns"), 0)
         boosts = ref.get("stat_boosts", [])
         if turns > 0 and boosts:
-            self.active_buffs.append({
-                "name": name,
-                "stat_boosts": list(boosts),
-                "turns_remaining": turns,
-            })
-            results.append(f"buff {turns} turns")
-            self._render_active_buffs()
+            self_tier = self.var_tier.get() or "T1"
+            add_status_effect_to_char(self.char, {
+                "name": name, "effect_type": "buff", "duration": turns,
+                "tier": self_tier, "stat_modifiers": list(boosts),
+                "dot_damage": 0, "dot_healing": 0, "stacks": 1, "max_stacks": 1,
+                "source": name,
+            }, self_tier)
+            results.append(f"buff {turns} turns (status effect)")
+            self._render_status_effects()
 
         # Permanent stat change (can be negative)
         perm_stat = ref.get("consume_perm_stat", "")
@@ -6102,34 +6256,6 @@ class CharacterSheet(ttk.Frame):
 
         effect_text = ", ".join(results) if results else "no effect"
         self.var_combat_result.set(f"Consumed {name}: {effect_text}")
-
-    def _render_active_buffs(self):
-        """Refresh the active buffs listbox."""
-        self.active_buffs_list.delete(0, tk.END)
-        stat_label_map = {k: lbl for k, lbl in BOOST_TARGET_LABELS}
-        for buff in self.active_buffs:
-            boost_parts = []
-            for b in buff.get("stat_boosts", []):
-                stat_name = stat_label_map.get(b["stat"], b["stat"])
-                if b["mode"] == "percent":
-                    boost_parts.append(f"{stat_name} {b['value']:+g}%")
-                else:
-                    boost_parts.append(f"{stat_name} {b['value']:+g}")
-            boosts_text = ", ".join(boost_parts)
-            display = f"{buff['name']}: {boosts_text} ({buff['turns_remaining']} turns)"
-            self.active_buffs_list.insert(tk.END, display)
-
-    def _remove_active_buff(self):
-        """Remove the selected active buff."""
-        sel = list(self.active_buffs_list.curselection())
-        if not sel:
-            messagebox.showinfo("Buffs", "Select a buff to remove.")
-            return
-        for idx in reversed(sel):
-            if 0 <= idx < len(self.active_buffs):
-                self.active_buffs.pop(idx)
-        self._render_active_buffs()
-        self._refresh_equipment_boosts_display()
 
     # ---------------- HP / Rest ----------------
 
@@ -6247,12 +6373,13 @@ class CharacterSheet(ttk.Frame):
         self.var_mana_density_mult.set(f"x{mana_density_multiplier(pts):.2f}")
 
     def _compute_equipment_boosts(self) -> dict:
-        """Sum passive stat boosts from equipped non-consumable items + active buffs.
+        """Sum passive stat boosts from equipped non-consumable items, active buffs,
+        always-on abilities, and active status effects.
 
-        Returns {target_key: {"flat": total_flat, "percent": total_pct}}.
-        Keys can be any STAT_KEY or "hp_max" / "mana_max".
-        Consumable items don't give passive boosts — their boosts only
-        apply when consumed (added to active_buffs).
+        Returns {target_key: {"flat": total_flat, "percent": total_pct, "mult": product}}.
+        flat/percent accumulate additively; mult accumulates as a product (default 1.0).
+        Keys can be any STAT_KEY or "hp_max" / "mana_max". Consumable items don't give
+        passive boosts — their boosts only apply when consumed (as a Status Effect).
         """
         totals = {}
 
@@ -6262,12 +6389,18 @@ class CharacterSheet(ttk.Frame):
                 if stat not in BOOST_TARGETS:
                     continue
                 if stat not in totals:
-                    totals[stat] = {"flat": 0.0, "percent": 0.0}
+                    totals[stat] = {"flat": 0.0, "percent": 0.0, "mult": 1.0}
                 try:
                     val = float(b.get("value", 0) or 0)
                 except (ValueError, TypeError):
                     val = 0.0
-                totals[stat][b.get("mode", "flat")] += val
+                mode = b.get("mode", "flat")
+                if mode == "mult":
+                    totals[stat]["mult"] *= val
+                elif mode == "percent":
+                    totals[stat]["percent"] += val
+                else:
+                    totals[stat]["flat"] += val
 
         # Passive boosts from non-consumable equipment
         for it in self.inv_data.get("equipment", []):
@@ -6275,25 +6408,33 @@ class CharacterSheet(ttk.Frame):
                 continue  # consumables only grant boosts when consumed
             _add_boosts(it.get("stat_boosts", []))
 
-        # Active buffs from consumed items / cast spells
-        for buff in self.active_buffs:
-            _add_boosts(buff.get("stat_boosts", []))
-
         # Passive boosts from abilities (buff_turns == 0 means always-on)
         for slot in self.ability_keys:
             for ab in self.abilities_data.get(slot, []):
                 if _safe_int(ab.get("buff_turns"), 0) == 0:
                     _add_boosts(ab.get("stat_boosts", []))
 
+        # Active status effects: tier-scaling is baked into stored modifiers; apply
+        # stacks here (flat/percent x stacks; mult left as-is).
+        for eff in self.char.get("status_effects", []):
+            stacks = max(1, _safe_int(eff.get("stacks"), 1))
+            stacked = []
+            for m in eff.get("stat_modifiers", []):
+                if m.get("mode") == "mult":
+                    stacked.append(m)
+                else:
+                    stacked.append({"stat": m.get("stat"), "mode": m.get("mode", "flat"),
+                                    "value": float(m.get("value", 0) or 0) * stacks})
+            _add_boosts(stacked)
+
         return totals
 
     def _apply_boost(self, base: int, info: dict) -> int:
-        """Apply flat + percent boosts to a base value and return effective int."""
+        """Apply flat + percent + multiplicative boosts to a base value."""
         if not info:
             return base
-        flat = info.get("flat", 0)
-        pct = info.get("percent", 0)
-        return apply_boost_value(base, flat, pct)
+        return apply_boost_value(base, info.get("flat", 0),
+                                 info.get("percent", 0), info.get("mult", 1.0))
 
     def _get_effective_stat(self, key: str) -> int:
         """Return the effective value of a stat after applying equipment boosts."""
@@ -6441,6 +6582,133 @@ class CharacterSheet(ttk.Frame):
         tp["initialized"] = True
         self._refresh_tier_progress()
 
+    # ---------------- Status effects ----------------
+
+    def _render_status_effects(self):
+        """Refresh the status effects listbox."""
+        if not hasattr(self, "status_fx_list"):
+            return
+        self.status_fx_list.delete(0, tk.END)
+        stat_label_map = dict(BOOST_TARGET_LABELS)
+        for eff in self.char.get("status_effects", []):
+            stacks = max(1, _safe_int(eff.get("stacks"), 1))
+            parts = []
+            for m in eff.get("stat_modifiers", []):
+                sn = stat_label_map.get(m.get("stat", ""), m.get("stat", ""))
+                parts.append(f"{sn} {format_boost(m.get('value', 0), m.get('mode', 'flat'))}")
+            if eff.get("dot_damage"):
+                parts.append(f"-{eff['dot_damage'] * stacks} HP/turn")
+            if eff.get("dot_healing"):
+                parts.append(f"+{eff['dot_healing'] * stacks} HP/turn")
+            dur = eff.get("duration", -1)
+            dur_txt = "permanent" if dur < 0 else f"{dur} turn{'s' if dur != 1 else ''}"
+            stack_txt = f" x{stacks}" if stacks > 1 else ""
+            detail = (": " + ", ".join(parts)) if parts else ""
+            self.status_fx_list.insert(
+                tk.END, f"{eff.get('name', '?')}{stack_txt} ({dur_txt}){detail}")
+
+    def status_add_dialog(self):
+        """Dialog to add a status effect from the library, choosing the source tier."""
+        win = tk.Toplevel(self.winfo_toplevel())
+        win.title("Add Status Effect")
+        win.geometry("360x220")
+        win.transient(self)
+        win.grab_set()
+        colors = self._get_current_colors()
+        style_toplevel(win, colors)
+
+        ttk.Label(win, text="Effect:").grid(row=0, column=0, sticky="w", padx=10, pady=(12, 4))
+        names = [e["name"] for e in STATUS_EFFECT_LIBRARY]
+        name_var = tk.StringVar(value=names[0])
+        ttk.Combobox(win, values=names, textvariable=name_var, state="readonly",
+                     width=22).grid(row=0, column=1, sticky="w", padx=6, pady=(12, 4))
+
+        ttk.Label(win, text="Source tier:").grid(row=1, column=0, sticky="w", padx=10, pady=4)
+        tier_var = tk.StringVar(value=self.var_tier.get() or "T1")
+        ttk.Combobox(win, values=[f"T{i}" for i in range(1, MAX_DEFINED_TIER + 1)],
+                     textvariable=tier_var, state="readonly", width=8).grid(
+            row=1, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(win, text="(Source tier vs this character's tier scales potency.)",
+                  style="Gray.TLabel", wraplength=320, justify="left").grid(
+            row=2, column=0, columnspan=2, sticky="w", padx=10, pady=(2, 8))
+
+        def do_add():
+            raw = next((dict(e) for e in STATUS_EFFECT_LIBRARY if e["name"] == name_var.get()), None)
+            if raw is None:
+                win.destroy()
+                return
+            raw["tier"] = tier_var.get()
+            raw["source"] = f"{tier_var.get()} source"
+            target_tier = self.var_tier.get() or "T1"
+            eff = add_status_effect_to_char(self.char, raw, target_tier)
+            if eff is None:
+                self.var_status_fx_result.set(
+                    f"{raw['name']} fizzled — too weak across the tier gap to do anything.")
+            else:
+                self.var_status_fx_result.set(f"Applied {eff['name']} (x{eff.get('stacks', 1)}).")
+            self._render_status_effects()
+            self._refresh_equipment_boosts_display()
+            win.destroy()
+
+        btns = ttk.Frame(win)
+        btns.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=8)
+        ttk.Button(btns, text="Add", command=do_add).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Cancel", command=win.destroy).pack(side=tk.RIGHT)
+
+    def status_remove_selected(self):
+        """Remove the selected status effect."""
+        sel = list(self.status_fx_list.curselection())
+        if not sel:
+            messagebox.showinfo("Status Effects", "Select an effect to remove.")
+            return
+        effects = self.char.get("status_effects", [])
+        for idx in reversed(sel):
+            if 0 <= idx < len(effects):
+                removed = effects.pop(idx)
+                self.var_status_fx_result.set(f"Removed {removed.get('name', '?')}.")
+        self._render_status_effects()
+        self._refresh_equipment_boosts_display()
+
+    def status_next_turn(self):
+        """Advance all status effects one turn: apply DoT/HoT to HP, decrement
+        durations, and remove expired effects."""
+        effects = self.char.get("status_effects", [])
+        if not effects:
+            self.var_status_fx_result.set("No active status effects.")
+            return
+        total_dot = total_hot = 0
+        for eff in effects:
+            stacks = max(1, _safe_int(eff.get("stacks"), 1))
+            total_dot += _safe_int(eff.get("dot_damage"), 0) * stacks
+            total_hot += _safe_int(eff.get("dot_healing"), 0) * stacks
+            if _safe_int(eff.get("duration"), -1) > 0:
+                eff["duration"] = _safe_int(eff.get("duration"), 0) - 1
+
+        net = total_hot - total_dot
+        try:
+            cur = int(self.var_hp_current.get())
+        except ValueError:
+            cur = 0
+        new_hp = max(0, min(self._get_effective_hp_max(), cur + net))
+        self.var_hp_current.set(str(new_hp))
+
+        expired = [e.get("name", "?") for e in effects if _safe_int(e.get("duration"), -1) == 0]
+        self.char["status_effects"] = [e for e in effects if _safe_int(e.get("duration"), -1) != 0]
+
+        msg = "Turn advanced."
+        if total_dot:
+            msg += f" DoT -{total_dot}."
+        if total_hot:
+            msg += f" HoT +{total_hot}."
+        if net:
+            msg += f" HP {cur}→{new_hp}."
+        if expired:
+            msg += f" Expired: {', '.join(expired)}."
+        self.var_status_fx_result.set(msg)
+        self._render_status_effects()
+        self._refresh_equipment_boosts_display()
+
     def _refresh_equipment_boosts_display(self):
         """Update the equipment-bonus labels next to each stat on the Overview tab.
 
@@ -6464,10 +6732,13 @@ class CharacterSheet(ttk.Frame):
             parts = []
             flat = info.get("flat", 0)
             pct = info.get("percent", 0)
+            mult = info.get("mult", 1.0)
             if flat:
                 parts.append(f"{flat:+g}")
             if pct:
                 parts.append(f"{pct:+g}%")
+            if mult != 1.0:
+                parts.append(f"x{mult:g}")
             if parts:
                 try:
                     base = int(self.var_stats[key].get().strip() or "0")
@@ -6495,10 +6766,13 @@ class CharacterSheet(ttk.Frame):
             parts = []
             flat = info.get("flat", 0)
             pct = info.get("percent", 0)
+            mult = info.get("mult", 1.0)
             if flat:
                 parts.append(f"{flat:+g}")
             if pct:
                 parts.append(f"{pct:+g}%")
+            if mult != 1.0:
+                parts.append(f"x{mult:g}")
             if parts:
                 try:
                     base = int(var.get().strip() or "0")
@@ -6915,6 +7189,8 @@ class CharacterSheet(ttk.Frame):
         self.combat_mana_entry.configure(state="disabled")
 
         self.var_hit_result.set("")
+        self.var_status_fx_result.set("")
+        self._render_status_effects()
         self._refresh_equipment_boosts_display()
         self._refresh_body_map()
         self._refresh_tier_progress()
