@@ -239,9 +239,10 @@ def save_character(char, path: Path):
 ROLL_TYPES = ["None", "Attack", "Save", "Check"]
 
 ABILITY_MODS = {
-    "core":  {"dmg": 1.50, "mana": 0.75},
-    "inner": {"dmg": 1.00, "mana": 1.00},
-    "outer": {"dmg": 0.75, "mana": 2.00},
+    "core":    {"dmg": 1.50, "mana": 0.75},
+    "inner":   {"dmg": 1.00, "mana": 1.00},
+    "outer":   {"dmg": 0.75, "mana": 2.00},
+    "learned": {"dmg": 1.00, "mana": 1.00},  # same multipliers as inner; no slot cap
 }
 
 # -------- Spell Generation System --------
@@ -546,7 +547,13 @@ ARMOR_SLOTS = [
     "Right Middle",
     "Right Ring",
     "Right Pinky",
+    "Main Hand",
+    "Off Hand",
+    "Extra",
 ]
+
+# Slots that bypass the "one item per slot" rule.
+UNLIMITED_SLOTS = {"Extra"}
 
 
 def clamp(x: float, lo: float, hi: float) -> float:
@@ -966,7 +973,7 @@ def default_character_template(name="New Hero"):
         "status_effects": [],
         "growth_items": {"bound_current": 0, "bound_max": 4},
         "inventory": {"equipment": [], "bag": [], "storage": []},
-        "abilities": {"core": [], "inner": [], "outer": []},
+        "abilities": {"core": [], "inner": [], "outer": [], "learned": []},
         "notes": "",
         "world_info": "",
         "talents": {}
@@ -1165,6 +1172,10 @@ def ensure_item_obj(x):
         "consume_heal_hp": 0, "consume_heal_mana": 0, "consume_turns": 0,
         "consume_perm_stat": "", "consume_perm_value": 0,
         "is_growth_item": False, "weight": 0.0, "armor_slot": "",
+        "is_two_handed": False,
+        # Optional embedded "special" ability (e.g. fire-burst on a hammer).
+        # Listed in Combat Quick Use when special_damage or special_mana_cost is set.
+        "special_name": "", "special_damage": "", "special_mana_cost": 0,
     }
     if isinstance(x, str):
         d = dict(defaults)
@@ -1192,6 +1203,10 @@ def ensure_item_obj(x):
             "is_growth_item": bool(x.get("is_growth_item", False)),
             "weight": float(x.get("weight", 0) or 0),
             "armor_slot": x.get("armor_slot", ""),
+            "is_two_handed": bool(x.get("is_two_handed", False)),
+            "special_name": x.get("special_name", ""),
+            "special_damage": x.get("special_damage", ""),
+            "special_mana_cost": _safe_int(x.get("special_mana_cost"), 0),
         }
     return dict(defaults)
 
@@ -2296,9 +2311,11 @@ class CharacterSheet(ttk.Frame):
         self.var_status_fx_result = tk.StringVar(value="")  # status effects feedback line
 
         self.var_hp_current = tk.StringVar()
-        self.var_hp_max = tk.StringVar()
+        self.var_hp_max = tk.StringVar()              # BASE max HP (editable, persisted)
+        self.var_hp_max_eff = tk.StringVar(value="0") # effective max HP shown in the slash display
         self.var_mana_current = tk.StringVar()
-        self.var_mana_max = tk.StringVar()
+        self.var_mana_max = tk.StringVar()            # BASE max Mana
+        self.var_mana_max_eff = tk.StringVar(value="0")
         self.var_mana_density_mult = tk.StringVar()  # display-only label for MD multiplier
         self.var_unspent = tk.StringVar()
 
@@ -2343,6 +2360,7 @@ class CharacterSheet(ttk.Frame):
         self.inv_damage = {k: tk.StringVar() for k in self.inv_keys}
         self.inv_apply_bonus = {k: tk.BooleanVar(value=True) for k in self.inv_keys}
         self.inv_is_ranged = {k: tk.BooleanVar(value=False) for k in self.inv_keys}
+        self.inv_is_two_handed = {k: tk.BooleanVar(value=False) for k in self.inv_keys}
         self.inv_move_target = {
             k: tk.StringVar(value=("bag" if k != "bag" else "equipment"))
             for k in self.inv_keys
@@ -2362,6 +2380,11 @@ class CharacterSheet(ttk.Frame):
         self.inv_consume_perm_stat = {k: tk.StringVar(value="") for k in self.inv_keys}
         self.inv_consume_perm_value = {k: tk.StringVar(value="0") for k in self.inv_keys}
 
+        # Special embedded ability on items (e.g. fire-burst on a hammer).
+        self.inv_special_name = {k: tk.StringVar(value="") for k in self.inv_keys}
+        self.inv_special_damage = {k: tk.StringVar(value="") for k in self.inv_keys}
+        self.inv_special_mana_cost = {k: tk.StringVar(value="0") for k in self.inv_keys}
+
         # Growth item flag (per inventory category)
         self.inv_is_growth_item = {k: tk.BooleanVar(value=False) for k in self.inv_keys}
 
@@ -2374,7 +2397,9 @@ class CharacterSheet(ttk.Frame):
         self.inv_armor_slot = {k: tk.StringVar(value="(none)") for k in self.inv_keys}
 
         # Abilities
-        self.ability_keys = ["core", "inner", "outer"]
+        # "learned" is uncapped (a showcase of learned skills), with the same combat
+        # multipliers as "inner". It does not appear in the tier slot-cap formulas.
+        self.ability_keys = ["core", "inner", "outer", "learned"]
         self.abilities_data = {k: [] for k in self.ability_keys}
         self.ability_selected_ref = {k: None for k in self.ability_keys}
 
@@ -2452,6 +2477,9 @@ class CharacterSheet(ttk.Frame):
         self.btn_advance_tier = ttk.Button(top, text="Advance Tier ⬆", command=self.advance_tier)
         # Live-refresh the bar when the tier field is edited.
         self.var_tier.trace_add("write", lambda *a: self._refresh_tier_progress())
+        # Keep the effective-max slash display in sync when the base entries are edited.
+        self.var_hp_max.trace_add("write", lambda *a: self._refresh_equipment_boosts_display())
+        self.var_mana_max.trace_add("write", lambda *a: self._refresh_equipment_boosts_display())
 
         ttk.Button(top, text="Save", command=self.on_save).pack(side=tk.RIGHT)
 
@@ -2602,10 +2630,14 @@ class CharacterSheet(ttk.Frame):
         res_frame = ttk.LabelFrame(left, text="Resources")
         res_frame.pack(fill=tk.X, pady=6)
 
+        # HP / Mana rows: current / EFFECTIVE max + boost info. Base max is edited via
+        # the Spend Points popup (or perm-buff consumables), not inline, to keep
+        # the panel compact.
         ttk.Label(res_frame, text="HP:").grid(row=0, column=0, sticky="w", padx=4, pady=3)
         ttk.Entry(res_frame, textvariable=self.var_hp_current, width=6).grid(row=0, column=1)
         ttk.Label(res_frame, text="/").grid(row=0, column=2)
-        ttk.Entry(res_frame, textvariable=self.var_hp_max, width=6).grid(row=0, column=3)
+        ttk.Label(res_frame, textvariable=self.var_hp_max_eff, width=6,
+                  style="Gray.TLabel").grid(row=0, column=3, sticky="w")
         _hpmax_lbl = ttk.Label(res_frame, textvariable=self.var_equip_bonus_res["hp_max"],
                                style="Gray.TLabel")
         _hpmax_lbl.grid(row=0, column=4, sticky="w", padx=(4, 0), pady=3)
@@ -2614,7 +2646,8 @@ class CharacterSheet(ttk.Frame):
         ttk.Label(res_frame, text="Mana:").grid(row=1, column=0, sticky="w", padx=4, pady=3)
         ttk.Entry(res_frame, textvariable=self.var_mana_current, width=6).grid(row=1, column=1)
         ttk.Label(res_frame, text="/").grid(row=1, column=2)
-        ttk.Entry(res_frame, textvariable=self.var_mana_max, width=6).grid(row=1, column=3)
+        ttk.Label(res_frame, textvariable=self.var_mana_max_eff, width=6,
+                  style="Gray.TLabel").grid(row=1, column=3, sticky="w")
         _manamax_lbl = ttk.Label(res_frame, textvariable=self.var_equip_bonus_res["mana_max"],
                                  style="Gray.TLabel")
         _manamax_lbl.grid(row=1, column=4, sticky="w", padx=(4, 0), pady=3)
@@ -2750,6 +2783,10 @@ class CharacterSheet(ttk.Frame):
             "notes": it.get("notes", ""),
             "apply_bonus": bool(it.get("apply_bonus", it.get("apply_pbd", True))),
             "is_ranged": bool(it.get("is_ranged", False)),
+            "is_two_handed": bool(it.get("is_two_handed", False)),
+            "special_name": it.get("special_name", "") or "",
+            "special_damage": it.get("special_damage", "") or "",
+            "special_mana_cost": _safe_int(it.get("special_mana_cost"), 0),
         }
         boosts = _normalize_stat_boosts(it.get("stat_boosts"))
         if boosts:
@@ -3277,6 +3314,10 @@ class CharacterSheet(ttk.Frame):
         c.create_text(340, 337, text="Gauntlet", fill=text_color,
                      font=("TkDefaultFont", 7), tags=("slot", tag_gh, "body_text"))
 
+        # --- Weapon slots (Off Hand left of left gauntlet, Main Hand right of right gauntlet) ---
+        draw_slot("Off Hand", 4, 315, 46, 360, label="Off")
+        draw_slot("Main Hand", 374, 315, 416, 360, label="Main")
+
         # --- Belt/Waist ---
         draw_slot("Belt/Waist", 140, 245, 280, 270, label="Belt")
 
@@ -3504,6 +3545,12 @@ class CharacterSheet(ttk.Frame):
         )
         r += 1
 
+        ttk.Checkbutton(details, text="Two-handed weapon (blocks Off Hand when slotted to Main Hand)",
+                        variable=self.inv_is_two_handed[key]).grid(
+            row=r, column=0, columnspan=2, sticky="w", padx=6, pady=(2, 2)
+        )
+        r += 1
+
         ttk.Checkbutton(details, text="Apply bonus (PBD melee / Precision ranged)", variable=self.inv_apply_bonus[key]).grid(
             row=r, column=0, columnspan=2, sticky="w", padx=6, pady=(2, 2)
         )
@@ -3568,6 +3615,21 @@ class CharacterSheet(ttk.Frame):
         ttk.Label(cons_frame, text="Value:").grid(row=3, column=2, sticky="w", padx=(0, 2), pady=(2, 4))
         ttk.Entry(cons_frame, textvariable=self.inv_consume_perm_value[key], width=6).grid(
             row=3, column=3, sticky="w", padx=(0, 6), pady=(2, 4))
+
+        # ---- Special embedded ability (e.g. a hammer with a fire-burst special) ----
+        sp_frame = ttk.LabelFrame(details, text="Special Ability (optional — adds a cast option in Combat)")
+        sp_frame.grid(row=r, column=0, columnspan=2, sticky="ew", padx=6, pady=(2, 6))
+        r += 1
+
+        ttk.Label(sp_frame, text="Name:").grid(row=0, column=0, sticky="w", padx=(6, 2), pady=(4, 2))
+        ttk.Entry(sp_frame, textvariable=self.inv_special_name[key], width=18).grid(
+            row=0, column=1, sticky="w", padx=(0, 8), pady=(4, 2))
+        ttk.Label(sp_frame, text="Damage:").grid(row=0, column=2, sticky="w", padx=(0, 2), pady=(4, 2))
+        ttk.Entry(sp_frame, textvariable=self.inv_special_damage[key], width=10).grid(
+            row=0, column=3, sticky="w", padx=(0, 6), pady=(4, 2))
+        ttk.Label(sp_frame, text="Mana cost:").grid(row=1, column=0, sticky="w", padx=(6, 2), pady=(2, 6))
+        ttk.Entry(sp_frame, textvariable=self.inv_special_mana_cost[key], width=6).grid(
+            row=1, column=1, sticky="w", padx=(0, 6), pady=(2, 6))
 
         ttk.Label(details, text="Notes:").grid(row=r, column=0, sticky="nw", padx=6, pady=4)
         notes_box = tk.Text(details, wrap="word", height=4)
@@ -3705,6 +3767,12 @@ class CharacterSheet(ttk.Frame):
         self.inv_apply_bonus[key].set(apply_bonus)
 
         self.inv_is_ranged[key].set(bool(it.get("is_ranged", False)))
+        self.inv_is_two_handed[key].set(bool(it.get("is_two_handed", False)))
+
+        # Special embedded ability
+        self.inv_special_name[key].set(it.get("special_name", ""))
+        self.inv_special_damage[key].set(it.get("special_damage", ""))
+        self.inv_special_mana_cost[key].set(str(_safe_int(it.get("special_mana_cost"), 0)))
 
         # Load stat boosts for this item
         self.inv_boost_data[key] = list(it.get("stat_boosts", []))
@@ -3751,6 +3819,12 @@ class CharacterSheet(ttk.Frame):
         it["apply_pbd"] = apply_bonus  # keep synced for damage_lab
 
         it["is_ranged"] = bool(self.inv_is_ranged[key].get())
+        it["is_two_handed"] = bool(self.inv_is_two_handed[key].get())
+
+        # Save the special embedded ability fields.
+        it["special_name"] = self.inv_special_name[key].get().strip()
+        it["special_damage"] = self.inv_special_damage[key].get().strip()
+        it["special_mana_cost"] = _safe_int(self.inv_special_mana_cost[key].get(), 0)
 
         # Save stat boosts
         it["stat_boosts"] = list(self.inv_boost_data[key])
@@ -3780,14 +3854,40 @@ class CharacterSheet(ttk.Frame):
         slot_display = self.inv_armor_slot[key].get()
         new_slot = "" if slot_display == "(none)" else slot_display
         if new_slot and key == "equipment":
-            for other_it in self.inv_data["equipment"]:
-                if other_it is not it and other_it.get("armor_slot", "") == new_slot:
-                    messagebox.showwarning(
-                        "Slot Occupied",
-                        f'The "{new_slot}" slot is already occupied by '
-                        f'"{other_it.get("name", "?")}". Unequip that item first.'
-                    )
-                    return
+            equip = self.inv_data["equipment"]
+            # 1. One item per slot (Extra is unlimited).
+            if new_slot not in UNLIMITED_SLOTS:
+                for other_it in equip:
+                    if other_it is not it and other_it.get("armor_slot", "") == new_slot:
+                        messagebox.showwarning(
+                            "Slot Occupied",
+                            f'The "{new_slot}" slot is already occupied by '
+                            f'"{other_it.get("name", "?")}". Unequip that item first.'
+                        )
+                        return
+            # 2. Two-handed weapon rules.
+            #    a. Slotting a 2H weapon into Main Hand requires Off Hand empty.
+            if new_slot == "Main Hand" and it.get("is_two_handed", False):
+                for other_it in equip:
+                    if other_it is not it and other_it.get("armor_slot", "") == "Off Hand":
+                        messagebox.showwarning(
+                            "Two-Handed Blocks Off Hand",
+                            f'This weapon is two-handed. Unequip "{other_it.get("name", "?")}" '
+                            f'from the Off Hand first.'
+                        )
+                        return
+            #    b. Slotting anything into Off Hand is blocked if Main Hand is 2H.
+            if new_slot == "Off Hand":
+                for other_it in equip:
+                    if (other_it is not it
+                            and other_it.get("armor_slot", "") == "Main Hand"
+                            and other_it.get("is_two_handed", False)):
+                        messagebox.showwarning(
+                            "Off Hand Blocked",
+                            f'A two-handed weapon ("{other_it.get("name", "?")}") is in the '
+                            f'Main Hand. Unequip it to free the Off Hand.'
+                        )
+                        return
         it["armor_slot"] = new_slot
 
         notes_box: tk.Text = getattr(self, f"inv_notes_box_{key}")
@@ -3977,7 +4077,8 @@ class CharacterSheet(ttk.Frame):
         self.ability_tabs = ttk.Notebook(frame)
         self.ability_tabs.pack(fill=tk.BOTH, expand=True)
 
-        for key, label in [("core", "Core"), ("inner", "Inner"), ("outer", "Outer")]:
+        for key, label in [("core", "Core"), ("inner", "Inner"), ("outer", "Outer"),
+                           ("learned", "Learned Skills")]:
             f = ttk.Frame(self.ability_tabs)
             self.ability_tabs.add(f, text=label)
             self._build_ability_category(f, key)
@@ -5714,19 +5815,55 @@ class CharacterSheet(ttk.Frame):
         actions = []
 
         for it in self.inv_data.get("equipment", []):
-            rng = "Ranged" if it.get("is_ranged", False) else "Melee"
-            actions.append({
-                "kind": "item",
-                "slot": None,
-                "ref": it,
-                "favorite": bool(it.get("favorite", False)),
-                "name": it.get("name", ""),
-                "display": f"{'⭐ ' if it.get('favorite', False) else ''}{it.get('name','')}  (Item:{rng}{'|Consumable' if it.get('consumable') else ''}{'|Growth' if it.get('is_growth_item') else ''})",
-            })
+            has_damage = bool((it.get("damage", "") or "").strip())
+            has_special = bool((it.get("special_damage", "") or "").strip()
+                               or _safe_int(it.get("special_mana_cost"), 0) > 0)
+            # Hide bloat: armor-style items with no damage, no consume effect, and no
+            # embedded special never need to be picked in combat.
+            if not has_damage and not it.get("consumable", False) and not has_special:
+                continue
+            if has_damage or it.get("consumable", False):
+                rng = "Ranged" if it.get("is_ranged", False) else "Melee"
+                actions.append({
+                    "kind": "item",
+                    "slot": None,
+                    "ref": it,
+                    "favorite": bool(it.get("favorite", False)),
+                    "name": it.get("name", ""),
+                    "display": f"{'⭐ ' if it.get('favorite', False) else ''}{it.get('name','')}  (Item:{rng}{'|Consumable' if it.get('consumable') else ''}{'|Growth' if it.get('is_growth_item') else ''})",
+                })
+            # Item's embedded special ability -> a synthetic ability action.
+            if has_special:
+                sp_name = (it.get("special_name", "") or "").strip() or f"{it.get('name','item')} Special"
+                synth = {
+                    "name": sp_name,
+                    "favorite": bool(it.get("favorite", False)),
+                    "roll_type": "None",
+                    "damage": it.get("special_damage", ""),
+                    "mana_cost": _safe_int(it.get("special_mana_cost"), 0),
+                    "notes": "",
+                    "overcast": {"enabled": False, "scale": 0, "power": 0.85, "cap": 999},
+                    "stat_boosts": [], "buff_turns": 0,
+                    "_item_special_of": it,  # marker so we can trace it back to the item
+                }
+                actions.append({
+                    "kind": "ability",
+                    "slot": "inner",  # same multipliers as inner (x1.0 dmg / x1.0 mana)
+                    "ref": synth,
+                    "favorite": bool(it.get("favorite", False)),
+                    "name": sp_name,
+                    "display": f"{'⭐ ' if it.get('favorite', False) else ''}{sp_name}  (Special of {it.get('name','item')})",
+                })
 
-        for slot in ["core", "inner", "outer"]:
+        for slot in self.ability_keys:
             for ab in self.abilities_data.get(slot, []):
+                has_damage = bool((ab.get("damage", "") or "").strip())
+                has_cost = _safe_int(ab.get("mana_cost"), 0) > 0
                 ab_boosts = ab.get("stat_boosts", [])
+                # Hide bloat: an ability with no damage AND no mana cost has nothing
+                # to actually do in combat (pure passives apply via _compute_equipment_boosts).
+                if not has_damage and not has_cost:
+                    continue
                 ab_bt = _safe_int(ab.get("buff_turns"), 0)
                 tag = ""
                 if ab_boosts:
@@ -6402,10 +6539,14 @@ class CharacterSheet(ttk.Frame):
                 else:
                     totals[stat]["flat"] += val
 
-        # Passive boosts from non-consumable equipment
+        # Passive boosts only from non-consumable items that are actually slotted in
+        # a body / Extra slot. Items sitting in the equipment list with no armor_slot
+        # do not contribute (otherwise two hats would double-buff).
         for it in self.inv_data.get("equipment", []):
             if it.get("consumable", False):
                 continue  # consumables only grant boosts when consumed
+            if not it.get("armor_slot", ""):
+                continue  # only slotted items boost
             _add_boosts(it.get("stat_boosts", []))
 
         # Passive boosts from abilities (buff_turns == 0 means always-on)
@@ -6753,11 +6894,19 @@ class CharacterSheet(ttk.Frame):
                 if lbl is not None:
                     lbl.configure(style="Gray.TLabel")
 
-        # HP / Mana max boost display
+        # HP / Mana max boost display. The slash on the Overview shows the EFFECTIVE
+        # max via var_*_max_eff (kept in sync here); base remains in var_*_max for editing.
+        eff_vars = {"hp_max": self.var_hp_max_eff, "mana_max": self.var_mana_max_eff}
         for res_key, var, _ in [("hp_max", self.var_hp_max, "HP"),
                                 ("mana_max", self.var_mana_max, "Mana")]:
             info = totals.get(res_key)
             lbl = self.lbl_equip_bonus_res.get(res_key)
+            try:
+                base = int((var.get() or "0").strip() or "0")
+            except ValueError:
+                base = 0
+            effective = self._apply_boost(base, info) if info else base
+            eff_vars[res_key].set(str(effective))
             if not info:
                 self.var_equip_bonus_res[res_key].set("")
                 if lbl is not None:
@@ -6774,11 +6923,6 @@ class CharacterSheet(ttk.Frame):
             if mult != 1.0:
                 parts.append(f"x{mult:g}")
             if parts:
-                try:
-                    base = int(var.get().strip() or "0")
-                except ValueError:
-                    base = 0
-                effective = self._apply_boost(base, info)
                 self.var_equip_bonus_res[res_key].set(_format(parts, base, effective))
                 if lbl is not None:
                     lbl.configure(style=self._boost_style_for(effective, base))
@@ -6787,7 +6931,39 @@ class CharacterSheet(ttk.Frame):
                 if lbl is not None:
                     lbl.configure(style="Gray.TLabel")
 
+        self._apply_max_boost_delta_to_current()
         self._refresh_carry_display()
+
+    def _apply_max_boost_delta_to_current(self):
+        """When the boost contribution to HP-Max / Mana-Max changes, mirror the
+        delta into current HP / Mana so a +20 HP buff actually gives the player
+        20 HP right now (and an unequipped/expired buff clamps current down).
+
+        Tracks only the *boost* portion (effective - base) so base-edit paths like
+        the Spend Points popup, which already adjust current themselves, do not
+        get double-bumped here."""
+        for get_eff, var_max, var_cur, prev_attr in (
+            (self._get_effective_hp_max, self.var_hp_max, self.var_hp_current, "_prev_boost_hp_max"),
+            (self._get_effective_mana_max, self.var_mana_max, self.var_mana_current, "_prev_boost_mana_max"),
+        ):
+            eff = get_eff()
+            try:
+                base = int((var_max.get() or "0").strip() or "0")
+            except ValueError:
+                base = 0
+            new_boost = eff - base
+            prev = getattr(self, prev_attr, new_boost)  # first call: no delta applied
+            delta = new_boost - prev
+            if delta != 0:
+                try:
+                    cur = int((var_cur.get() or "0").strip() or "0")
+                except ValueError:
+                    cur = 0
+                if delta > 0:
+                    cur += delta
+                cur = max(0, min(eff, cur))
+                var_cur.set(str(cur))
+            setattr(self, prev_attr, new_boost)
 
     def _recount_growth_items(self):
         """Auto-count items tagged as growth items across all inventory slots."""
@@ -7125,6 +7301,10 @@ class CharacterSheet(ttk.Frame):
             self.inv_damage[k].set("")
             self.inv_apply_bonus[k].set(True)
             self.inv_is_ranged[k].set(False)
+            self.inv_is_two_handed[k].set(False)
+            self.inv_special_name[k].set("")
+            self.inv_special_damage[k].set("")
+            self.inv_special_mana_cost[k].set("0")
             self.inv_boost_data[k] = []
             self.inv_boost_render(k)
             self.inv_consumable[k].set(False)
@@ -7191,6 +7371,10 @@ class CharacterSheet(ttk.Frame):
         self.var_hit_result.set("")
         self.var_status_fx_result.set("")
         self._render_status_effects()
+        # Reset boost-delta trackers so the load doesn't fire a spurious HP/Mana bump.
+        for _attr in ("_prev_boost_hp_max", "_prev_boost_mana_max"):
+            if hasattr(self, _attr):
+                delattr(self, _attr)
         self._refresh_equipment_boosts_display()
         self._refresh_body_map()
         self._refresh_tier_progress()
@@ -7272,6 +7456,16 @@ class CharacterSheet(ttk.Frame):
                 slot = it.get("armor_slot", "")
                 if slot:
                     item_dict["armor_slot"] = slot
+                if it.get("is_two_handed"):
+                    item_dict["is_two_handed"] = True
+                # Save the special embedded ability only if it has any content.
+                sp_name = (it.get("special_name", "") or "").strip()
+                sp_dmg = (it.get("special_damage", "") or "").strip()
+                sp_cost = _safe_int(it.get("special_mana_cost"), 0)
+                if sp_name or sp_dmg or sp_cost > 0:
+                    item_dict["special_name"] = sp_name
+                    item_dict["special_damage"] = sp_dmg
+                    item_dict["special_mana_cost"] = sp_cost
                 cleaned.append(item_dict)
             inv[k] = cleaned
 
